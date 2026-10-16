@@ -12,6 +12,7 @@
 //!   produce a stale or mixed value, never undefined behaviour.
 //! * [`hook`]: replace a function pointer in a vtable (or any pointer-sized
 //!   slot) and restore it when the guard is dropped.
+//! * `window`: find the process's main window and post input messages to it.
 //! * [`entry!`]: the DLL entry point, which runs the client's initialisation
 //!   on a fresh thread, outside the loader lock, with panics caught.
 //!
@@ -21,6 +22,8 @@
 pub mod hook;
 pub mod logging;
 pub mod mem;
+#[cfg(windows)]
+pub mod window;
 #[cfg(windows)]
 #[doc(hidden)]
 pub mod dll;
