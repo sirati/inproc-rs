@@ -28,7 +28,10 @@
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = "x86_64-w64-mingw32-gcc";
         CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = "-L native=${mingw64.windows.pthreads}/lib";
         CARGO_TARGET_I686_PC_WINDOWS_GNU_LINKER = "i686-w64-mingw32-gcc";
-        CARGO_TARGET_I686_PC_WINDOWS_GNU_RUSTFLAGS = "-L native=${mingw32.windows.pthreads}/lib";
+        # nixpkgs builds the 32-bit mingw gcc with the mcfgthread threading
+        # model; libgcc_eh needs it. Linked statically, so no extra DLL has to
+        # ship next to the game.
+        CARGO_TARGET_I686_PC_WINDOWS_GNU_RUSTFLAGS = "-L native=${mingw32.windows.pthreads}/lib -L native=${mingw32.windows.mcfgthreads}/lib -C link-arg=-Wl,-Bstatic -C link-arg=-lmcfgthread -C link-arg=-Wl,-Bdynamic -C link-arg=-lkernel32 -C link-arg=-lntdll";
 
         LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibs;
 

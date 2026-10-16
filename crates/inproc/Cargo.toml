@@ -1,0 +1,21 @@
+[package]
+name = "inproc"
+description = "Safe abstractions for code injected into a foreign Windows process: guarded memory reads, vtable hooks, DLL entry"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+thiserror.workspace = true
+log.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemServices",
+] }
