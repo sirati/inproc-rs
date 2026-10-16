@@ -745,3 +745,65 @@ macro_rules! stdcall_hook {
         }
     };
 }
+
+/// Like [`stdcall_hook!`] for `__cdecl` functions (the caller pops the
+/// stack arguments):
+///
+/// ```ignore
+/// inproc::cdecl_hook! {
+///     pub mod present(rect) -> ();
+/// }
+/// ```
+#[macro_export]
+macro_rules! cdecl_hook {
+    ($(#[$m:meta])* $vis:vis mod $name:ident($($arg:ident),*) -> $ret:ty;) => {
+        $(#[$m])*
+        $vis mod $name {
+            #![allow(unsafe_code, dead_code, unused_imports)]
+            use super::*;
+
+            /// One invocation of the hooked function.
+            pub struct Call {
+                $(pub $arg: u32,)*
+                original: u32,
+            }
+
+            impl Call {
+                /// Runs the original function with the same arguments.
+                pub fn original(&self) -> $ret {
+                    self.original_with($(self.$arg),*)
+                }
+
+                /// Runs the original function with other arguments.
+                pub fn original_with(&self, $($arg: u32),*) -> $ret {
+                    #[cfg(target_arch = "x86")]
+                    {
+                        type Raw = extern "C" fn($($crate::__ident_u32!($arg)),*) -> $ret;
+                        // SAFETY: `original` is the hooked function, whose
+                        // signature is this macro invocation's contract.
+                        let f: Raw = unsafe { ::core::mem::transmute::<usize, Raw>(self.original as usize) };
+                        f($($arg),*)
+                    }
+                    #[cfg(not(target_arch = "x86"))]
+                    { let _ = ($($arg),*); unreachable!("hooks only run in 32-bit x86 processes") }
+                }
+            }
+
+            #[cfg(target_arch = "x86")]
+            extern "C" fn trampoline($($arg: u32),*) -> $ret {
+                let call = Call { $($arg,)* original: ORIGINAL.load(SeqCst) };
+                let guard = HANDLER.read().unwrap_or_else(|e| e.into_inner());
+                let Some(handler) = guard.as_ref() else { return call.original() };
+                match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| handler(&call))) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        ::log::error!(concat!("hook ", stringify!($name), " panicked; calling original"));
+                        call.original()
+                    }
+                }
+            }
+
+            $crate::__hook_common!($name, $ret);
+        }
+    };
+}
