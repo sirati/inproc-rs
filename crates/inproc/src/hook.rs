@@ -115,6 +115,26 @@ impl InlinePatch {
     }
 }
 
+impl InlinePatch {
+    /// Takes over a function that already starts with a `jmp rel32`
+    /// (another mod's hook): the jump is pointed at `detour`; the old
+    /// destination, reported to `on_original` first, still behaves like the
+    /// function. No instructions are moved, so nothing position-dependent
+    /// can break.
+    #[doc(hidden)]
+    pub fn install_over_jmp(target: u32, detour: u32, on_original: impl FnOnce(u32)) -> Result<InlinePatch, HookError> {
+        let bytes = Ptr32::<u8>::new(target).read_array(5)?;
+        if bytes[0] != 0xE9 {
+            return Err(HookError::UnexpectedCode { addr: target, found: bytes, expected: vec![0xE9] });
+        }
+        let rel = i32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+        let destination = target.wrapping_add(5).wrapping_add(rel as u32);
+        on_original(destination);
+        imp::write(target, &jmp(target, detour))?;
+        Ok(InlinePatch { target, original: bytes, trampoline: destination })
+    }
+}
+
 impl Drop for InlinePatch {
     fn drop(&mut self) {
         // The trampoline is leaked on purpose: a thread may still be in it.
@@ -366,6 +386,28 @@ macro_rules! __hook_common {
             }
             #[cfg(not(target_arch = "x86"))]
             { let _ = (function, prologue, handler); Err($crate::hook::HookError::Unsupported) }
+        }
+
+        /// Hooks a function another mod already redirects with a `jmp rel32`
+        /// at its start (see `InlinePatch::install_over_jmp`).
+        pub fn install_over_jmp(
+            function: u32,
+            handler: impl Fn(&Call) -> $ret + Send + Sync + 'static,
+        ) -> Result<Installed, $crate::hook::HookError> {
+            #[cfg(target_arch = "x86")]
+            {
+                claim()?;
+                *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(handler));
+                let result = $crate::hook::InlinePatch::install_over_jmp(function, trampoline as usize as u32, |t| {
+                    ORIGINAL.store(t, SeqCst)
+                });
+                result.map(|p| Installed(Some(Patch::Inline(p)))).inspect_err(|_| {
+                    *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = None;
+                    ACTIVE.store(false, SeqCst);
+                })
+            }
+            #[cfg(not(target_arch = "x86"))]
+            { let _ = (function, handler); Err($crate::hook::HookError::Unsupported) }
         }
     };
 }
