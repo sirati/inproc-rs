@@ -5,6 +5,8 @@ members = [
     "crates/tile-render",
     "crates/civ3-assets",
     "crates/inproc",
+    "crates/civ3-sys",
+    "crates/civ3-bridge",
 ]
 # The shader crate is compiled by rust-gpu (pinned nightly) from
 # tile-render's build script, never by the workspace toolchain.
@@ -18,7 +20,7 @@ version = "0.1.0"
 [workspace.dependencies]
 tile-render-shared = { path = "crates/tile-render-shared" }
 tile-render = { path = "crates/tile-render" }
-bytemuck = { version = "1.24", features = ["derive"] }
+bytemuck = { version = "1.24", features = ["derive", "min_const_generics"] }
 glam = "0.30"
 wgpu = { version = "30", features = ["spirv"] }
 winit = "0.30"

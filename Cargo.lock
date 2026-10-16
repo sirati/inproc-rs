@@ -198,6 +198,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "civ3-bridge"
+version = "0.1.0"
+dependencies = [
+ "civ3-sys",
+ "inproc",
+ "log",
+]
+
+[[package]]
+name = "civ3-sys"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "inproc",
+ "log",
+ "thiserror",
+]
+
+[[package]]
 name = "codespan-reporting"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
