@@ -12,8 +12,13 @@
 //!   another mod's patch, and prologues with position-dependent instructions
 //!   (only declare bytes that can run unchanged from elsewhere).
 //!
+//! * **Call site hooks** point one `call rel32` instruction at a Rust
+//!   handler ([`call_site_hook!`](crate::call_site_hook)), for when only
+//!   some of a function's callers should be intercepted.
+//!
 //! The public way in is [`fastcall_hook!`](crate::fastcall_hook), which
 //! generates a trampoline with the hooked function's signature.
+//! [`thiscall_fn!`](crate::thiscall_fn) declares a foreign function to call.
 
 use crate::mem::{MemError, Ptr32};
 
@@ -148,6 +153,72 @@ impl Drop for InlinePatch {
 fn jmp(at: u32, to: u32) -> [u8; 5] {
     let rel = to.wrapping_sub(at.wrapping_add(5)).to_le_bytes();
     [0xE9, rel[0], rel[1], rel[2], rel[3]]
+}
+
+/// `call rel32` located at `at`, calling `to`.
+fn call_rel(at: u32, to: u32) -> [u8; 5] {
+    let mut code = jmp(at, to);
+    code[0] = 0xE8;
+    code
+}
+
+/// Where the `call rel32` `bytes` located at `at` goes, if it is one.
+fn call_target(at: u32, bytes: &[u8]) -> Option<u32> {
+    match *bytes {
+        [0xE8, a, b, c, d] => Some(at.wrapping_add(5).wrapping_add(u32::from_le_bytes([a, b, c, d]))),
+        _ => None,
+    }
+}
+
+/// Verifies that the function at `address` starts with `prologue`, or with
+/// a `jmp rel32` (another mod redirecting it, e.g. C3X) when `prologue` is
+/// not one itself: the check before calling a foreign function.
+pub fn check_function_start(address: u32, prologue: &[u8]) -> Result<(), HookError> {
+    let first = Ptr32::<u8>::new(address).read()?;
+    if first == 0xE9 && prologue.first() != Some(&0xE9) {
+        return Ok(());
+    }
+    InlinePatch::check(address, prologue)
+}
+
+/// A `call rel32` instruction pointed at another function; restored on
+/// drop. Only the instruction's target changes: the call stays a call,
+/// with the caller's arguments and stack untouched.
+#[derive(Debug)]
+pub struct CallSitePatch {
+    site: u32,
+    original: [u8; 5],
+}
+
+impl CallSitePatch {
+    /// The function the `call rel32` at `site` calls, if its five bytes
+    /// are exactly `expected` (which must be such a call).
+    pub fn check(site: u32, expected: &[u8; 5]) -> Result<u32, HookError> {
+        let found = Ptr32::<u8>::new(site).read_array(5)?;
+        let unexpected = || HookError::UnexpectedCode { addr: site, found: found.clone(), expected: expected.to_vec() };
+        if found != expected {
+            return Err(unexpected());
+        }
+        call_target(site, expected).ok_or_else(unexpected)
+    }
+
+    /// Points the call at `site` (exactly `expected`) at `detour`;
+    /// `on_original` hears the old callee before the call is changed.
+    #[doc(hidden)]
+    pub fn install(site: u32, expected: &[u8; 5], detour: u32, on_original: impl FnOnce(u32)) -> Result<CallSitePatch, HookError> {
+        let callee = Self::check(site, expected)?;
+        on_original(callee);
+        imp::write(site, &call_rel(site, detour))?;
+        Ok(CallSitePatch { site, original: *expected })
+    }
+}
+
+impl Drop for CallSitePatch {
+    fn drop(&mut self) {
+        if let Err(e) = imp::write(self.site, &self.original) {
+            log::error!("restoring patched call at {:#x}: {e}", self.site);
+        }
+    }
 }
 
 #[cfg(all(windows, target_arch = "x86"))]
@@ -300,6 +371,191 @@ mod tests {
         assert_eq!(super::jmp(0x1000, 0x1005), [0xE9, 0, 0, 0, 0]);
         assert_eq!(super::jmp(0x1000, 0x0FFB), [0xE9, 0xF6, 0xFF, 0xFF, 0xFF]);
     }
+
+    #[test]
+    fn call_sites_decode_and_encode() {
+        // Civ3's modal loop: `call 0x624B90` at 0x6053B4.
+        let bytes = [0xE8, 0xD7, 0xF7, 0x01, 0x00];
+        assert_eq!(super::call_target(0x60_53B4, &bytes), Some(0x62_4B90));
+        assert_eq!(super::call_rel(0x60_53B4, 0x62_4B90), bytes);
+        assert_eq!(super::call_target(0x1000, &[0xE9, 0, 0, 0, 0]), None);
+        assert_eq!(super::call_target(0x1000, &[0xE8, 0, 0]), None);
+        let to = 0x1000_2000;
+        assert_eq!(super::call_target(0x60_53B4, &super::call_rel(0x60_53B4, to)), Some(to));
+    }
+}
+
+/// Redirects one `call rel32` instruction (a call site) of a foreign
+/// program to a Rust handler, for a function taking no arguments (cdecl,
+/// so nothing to pop): a module with `install(site, expected, handler)`.
+///
+/// ```ignore
+/// inproc::call_site_hook! {
+///     /// The message pump call in the modal loop.
+///     pub mod modal_pump() -> u32;
+/// }
+/// fn handler(call: &modal_pump::Call) -> u32 { before(); call.original() }
+/// let hook = modal_pump::install(0x60_53B4, &[0xE8, 0xD7, 0xF7, 0x01, 0x00], handler)?;
+/// ```
+///
+/// Unlike the function hooks, the handler is a plain `fn` kept in an
+/// atomic, and no lock is held while it runs: it may call back into the
+/// program, and the program may reach the same call site again from in
+/// there (a nested dialog). The declared signature is the one assumption
+/// that cannot be checked; the five bytes at the site are.
+#[macro_export]
+macro_rules! call_site_hook {
+    ($(#[$m:meta])* $vis:vis mod $name:ident() -> $ret:ty;) => {
+        $(#[$m])*
+        $vis mod $name {
+            #![allow(unsafe_code, dead_code, unused_imports)]
+            use ::std::sync::atomic::Ordering::SeqCst;
+
+            /// One pass through the call site.
+            pub struct Call {
+                original: u32,
+            }
+
+            impl Call {
+                /// Calls the function the site called before.
+                pub fn original(&self) -> $ret {
+                    #[cfg(target_arch = "x86")]
+                    {
+                        type Raw = extern "C" fn() -> $ret;
+                        // SAFETY: `original` is the target of the checked
+                        // `call rel32`, whose signature this macro
+                        // invocation declares.
+                        let f: Raw = unsafe { ::core::mem::transmute::<usize, Raw>(self.original as usize) };
+                        f()
+                    }
+                    #[cfg(not(target_arch = "x86"))]
+                    { unreachable!("call site hooks only run in 32-bit x86 processes") }
+                }
+            }
+
+            /// The handler, a `fn(&Call) -> $ret` as an address (0: none).
+            static HANDLER: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
+            static ORIGINAL: ::std::sync::atomic::AtomicU32 = ::std::sync::atomic::AtomicU32::new(0);
+            static ACTIVE: ::std::sync::atomic::AtomicBool = ::std::sync::atomic::AtomicBool::new(false);
+
+            #[cfg(target_arch = "x86")]
+            extern "C" fn detour() -> $ret {
+                let call = Call { original: ORIGINAL.load(SeqCst) };
+                let handler = HANDLER.load(SeqCst);
+                if handler == 0 {
+                    return call.original();
+                }
+                // SAFETY: only `install` stores here, and only a
+                // `fn(&Call) -> $ret`.
+                let handler = unsafe { ::core::mem::transmute::<usize, fn(&Call) -> $ret>(handler) };
+                match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| handler(&call))) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        // Never unwind into the foreign program.
+                        ::log::error!(concat!("call site hook ", stringify!($name), " panicked; calling original"));
+                        call.original()
+                    }
+                }
+            }
+
+            /// An active patch; the call site is restored when dropped.
+            pub struct Installed(Option<$crate::hook::CallSitePatch>);
+
+            impl Drop for Installed {
+                fn drop(&mut self) {
+                    drop(self.0.take());
+                    HANDLER.store(0, SeqCst);
+                    ACTIVE.store(false, SeqCst);
+                }
+            }
+
+            /// Points the `call rel32` at `site`, whose bytes must be
+            /// exactly `expected`, at `handler`.
+            pub fn install(site: u32, expected: &[u8; 5], handler: fn(&Call) -> $ret) -> Result<Installed, $crate::hook::HookError> {
+                #[cfg(target_arch = "x86")]
+                {
+                    if ACTIVE.swap(true, SeqCst) {
+                        return Err($crate::hook::HookError::AlreadyInstalled);
+                    }
+                    let result = $crate::hook::CallSitePatch::install(site, expected, detour as usize as u32, |callee| {
+                        ORIGINAL.store(callee, SeqCst);
+                        HANDLER.store(handler as usize, SeqCst);
+                    });
+                    result.map(|p| Installed(Some(p))).inspect_err(|_| {
+                        HANDLER.store(0, SeqCst);
+                        ACTIVE.store(false, SeqCst);
+                    })
+                }
+                #[cfg(not(target_arch = "x86"))]
+                { let _ = (site, expected, handler); Err($crate::hook::HookError::Unsupported) }
+            }
+        }
+    };
+}
+
+/// Declares a `__thiscall` function of a foreign 32-bit x86 program (called
+/// as `__fastcall` with `edx` 0) that Rust code may call: a module with a
+/// `Function` handle made by `Function::at(address, prologue)`, which
+/// checks the function's first bytes (or a mod's `jmp rel32` there, see
+/// [`check_function_start`]), and `Function::call(this, args...)`.
+///
+/// ```ignore
+/// inproc::thiscall_fn! {
+///     /// `Unit *Main_Screen_Form::find_visible_unit(this, x, y, excluded)`
+///     pub fn find_visible_unit(this; x, y, excluded) -> u32;
+/// }
+/// let f = find_visible_unit::Function::at(0x4E_3F50, &[0x83, 0xEC, 0x1C, 0x53, 0x55])?;
+/// let unit = f.call(screen, 10, 20, 0);
+/// ```
+///
+/// What cannot be checked is the declaration (exactly these stack
+/// arguments, the callee pops them) and the moment: call only on the
+/// program's own thread, at a point where it would call the function
+/// itself.
+#[macro_export]
+macro_rules! thiscall_fn {
+    ($(#[$m:meta])* $vis:vis fn $name:ident($this:ident; $($arg:ident),*) -> $ret:ty;) => {
+        $(#[$m])*
+        $vis mod $name {
+            #![allow(unsafe_code, dead_code)]
+
+            /// The function, its start checked.
+            #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+            pub struct Function(u32);
+
+            impl Function {
+                /// The function at `address`, which must start with
+                /// `prologue` (or another mod's `jmp rel32`).
+                pub fn at(address: u32, prologue: &[u8]) -> Result<Function, $crate::hook::HookError> {
+                    #[cfg(target_arch = "x86")]
+                    {
+                        $crate::hook::check_function_start(address, prologue)?;
+                        Ok(Function(address))
+                    }
+                    #[cfg(not(target_arch = "x86"))]
+                    { let _ = (address, prologue); Err($crate::hook::HookError::Unsupported) }
+                }
+
+                pub fn address(self) -> u32 {
+                    self.0
+                }
+
+                /// Calls it.
+                pub fn call(self, $this: u32 $(, $arg: u32)*) -> $ret {
+                    #[cfg(target_arch = "x86")]
+                    {
+                        type Raw = extern "fastcall" fn(u32, u32 $(, $crate::__ident_u32!($arg))*) -> $ret;
+                        // SAFETY: `at` checked the function's start; the
+                        // signature is this macro invocation's contract.
+                        let f: Raw = unsafe { ::core::mem::transmute::<usize, Raw>(self.0 as usize) };
+                        f($this, 0 $(, $arg)*)
+                    }
+                    #[cfg(not(target_arch = "x86"))]
+                    { let _ = ($this $(, $arg)*); unreachable!("no foreign functions outside 32-bit x86 processes") }
+                }
+            }
+        }
+    };
 }
 
 /// The parts of a hook module shared by all calling conventions: the

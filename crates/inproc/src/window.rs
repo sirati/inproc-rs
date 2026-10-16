@@ -10,7 +10,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, EnumWindows, GCL_STYLE, GetClassLongW, GetClientRect, GetSystemMetrics, GetWindowTextW,
     GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SM_CXDOUBLECLK, SM_CYDOUBLECLK, WM_CHAR, WM_KEYDOWN,
     WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP,
 };
 
 /// A mouse button.
@@ -95,6 +95,12 @@ impl Window {
     fn post(self, message: u32, wparam: WPARAM, lparam: LPARAM) {
         // SAFETY: posting copies plain values into the target's queue.
         unsafe { PostMessageW(self.hwnd(), message, wparam, lparam) };
+    }
+
+    /// Wakes the window's thread if it waits for messages (`WaitMessage`):
+    /// posts a message that does nothing.
+    pub fn wake(self) {
+        self.post(WM_NULL, 0, 0);
     }
 
     /// The pointer moved to client position (x, y).
