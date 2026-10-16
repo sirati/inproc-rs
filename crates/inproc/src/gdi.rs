@@ -27,6 +27,11 @@ pub fn dc_font(dc: u32) -> Option<LogFont> {
 pub fn dc_text_color(dc: u32) -> (u8, u8, u8) {
     // SAFETY: returns CLR_INVALID for non-DCs.
     let c = unsafe { GetTextColor(dc as usize as *mut core::ffi::c_void) };
+    // `DIBINDEX(i)` (0x10FF00ii): a colour-table index; the canvases are
+    // 16-bit DIBs without a table, where GDI draws pixel value 0, black.
+    if c >> 16 == 0x10FF {
+        return (0, 0, 0);
+    }
     (c as u8, (c >> 8) as u8, (c >> 16) as u8)
 }
 
