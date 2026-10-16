@@ -25,6 +25,8 @@ pub mod mem;
 #[cfg(windows)]
 pub mod gdi;
 #[cfg(windows)]
+pub mod pe;
+#[cfg(windows)]
 pub mod window;
 #[cfg(windows)]
 #[doc(hidden)]

@@ -1,6 +1,6 @@
 //! Looking at GDI objects the process created.
 
-use windows_sys::Win32::Graphics::Gdi::{GetObjectA, GetObjectType, LOGFONTA, OBJ_FONT};
+use windows_sys::Win32::Graphics::Gdi::{GetCurrentObject, GetObjectA, GetObjectType, GetTextColor, LOGFONTA, OBJ_FONT};
 
 /// The parameters a font was created with.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,6 +14,20 @@ pub struct LogFont {
     pub out_precision: u8,
     pub pitch_and_family: u8,
     pub face: String,
+}
+
+/// The font selected into device context `dc`.
+pub fn dc_font(dc: u32) -> Option<LogFont> {
+    // SAFETY: GetCurrentObject accepts any value, NULL for non-DCs.
+    let h = unsafe { GetCurrentObject(dc as usize as *mut core::ffi::c_void, OBJ_FONT as u32) };
+    font(h as usize as u32)
+}
+
+/// The text colour of `dc` as (r, g, b).
+pub fn dc_text_color(dc: u32) -> (u8, u8, u8) {
+    // SAFETY: returns CLR_INVALID for non-DCs.
+    let c = unsafe { GetTextColor(dc as usize as *mut core::ffi::c_void) };
+    (c as u8, (c >> 8) as u8, (c >> 16) as u8)
 }
 
 /// The LOGFONT of `handle`, if it is a font handle.

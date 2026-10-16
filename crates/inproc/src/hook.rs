@@ -244,15 +244,6 @@ macro_rules! fastcall_hook {
                 }
             }
 
-            type Handler = ::std::boxed::Box<dyn Fn(&Call) -> $ret + Send + Sync>;
-            static HANDLER: ::std::sync::RwLock<Option<Handler>> = ::std::sync::RwLock::new(None);
-            /// The function to call as "original"; stays valid after
-            /// uninstalling (slot: the old pointer; inline: the leaked
-            /// trampoline), so a call racing an uninstall still works.
-            static ORIGINAL: ::std::sync::atomic::AtomicU32 = ::std::sync::atomic::AtomicU32::new(0);
-            static ACTIVE: ::std::sync::atomic::AtomicBool = ::std::sync::atomic::AtomicBool::new(false);
-            use ::std::sync::atomic::Ordering::SeqCst;
-
             #[cfg(target_arch = "x86")]
             extern "fastcall" fn trampoline($this: u32, $edx: u32 $(, $arg: u32)*) -> $ret {
                 let call = Call { $this, $edx, $($arg,)* original: ORIGINAL.load(SeqCst) };
@@ -269,75 +260,7 @@ macro_rules! fastcall_hook {
                 }
             }
 
-            enum Patch {
-                Slot($crate::hook::SlotPatch),
-                Inline($crate::hook::InlinePatch),
-            }
-
-            /// An active hook; uninstalls when dropped.
-            pub struct Installed(Option<Patch>);
-
-            impl Drop for Installed {
-                fn drop(&mut self) {
-                    // Restore the code first, then retire the handler (this
-                    // waits for calls still inside it).
-                    drop(self.0.take());
-                    *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = None;
-                    ACTIVE.store(false, SeqCst);
-                }
-            }
-
-            fn claim() -> Result<(), $crate::hook::HookError> {
-                if ACTIVE.swap(true, SeqCst) { Err($crate::hook::HookError::AlreadyInstalled) } else { Ok(()) }
-            }
-
-            /// Points the function-pointer `slot` at this hook.
-            pub fn install_slot(
-                slot: $crate::mem::Ptr32<u32>,
-                handler: impl Fn(&Call) -> $ret + Send + Sync + 'static,
-            ) -> Result<Installed, $crate::hook::HookError> {
-                #[cfg(target_arch = "x86")]
-                {
-                    claim()?;
-                    let result = (|| {
-                        ORIGINAL.store(slot.read()?, SeqCst);
-                        *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(handler));
-                        $crate::hook::SlotPatch::replace(slot, trampoline as usize as u32)
-                    })();
-                    result.map(|p| Installed(Some(Patch::Slot(p)))).inspect_err(|_| ACTIVE.store(false, SeqCst))
-                }
-                #[cfg(not(target_arch = "x86"))]
-                { let _ = (slot, handler); Err($crate::hook::HookError::Unsupported) }
-            }
-
-            /// Patches the start of `function`, whose first bytes must be
-            /// exactly `prologue` (>= 5 bytes of self-contained instructions).
-            pub fn install_inline(
-                function: u32,
-                prologue: &[u8],
-                handler: impl Fn(&Call) -> $ret + Send + Sync + 'static,
-            ) -> Result<Installed, $crate::hook::HookError> {
-                #[cfg(target_arch = "x86")]
-                {
-                    claim()?;
-                    let result = (|| {
-                        $crate::hook::InlinePatch::check(function, prologue)?;
-                        // Handler first: the jump may be taken the moment it
-                        // is written. Until ORIGINAL is set, the trampoline
-                        // cannot be reached (the jump is not written yet).
-                        *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(handler));
-                        $crate::hook::InlinePatch::install(function, prologue, trampoline as usize as u32, |t| {
-                            ORIGINAL.store(t, SeqCst)
-                        })
-                    })();
-                    result.map(|p| Installed(Some(Patch::Inline(p)))).inspect_err(|_| {
-                        *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = None;
-                        ACTIVE.store(false, SeqCst);
-                    })
-                }
-                #[cfg(not(target_arch = "x86"))]
-                { let _ = (function, prologue, handler); Err($crate::hook::HookError::Unsupported) }
-            }
+            $crate::__hook_common!($name, $ret);
         }
     };
 }
@@ -357,4 +280,154 @@ mod tests {
         assert_eq!(super::jmp(0x1000, 0x1005), [0xE9, 0, 0, 0, 0]);
         assert_eq!(super::jmp(0x1000, 0x0FFB), [0xE9, 0xF6, 0xFF, 0xFF, 0xFF]);
     }
+}
+
+/// The parts of a hook module shared by all calling conventions: the
+/// handler and original-function slots, `Installed`, `install_slot` and
+/// `install_inline`. Expects `Call` and `trampoline` in the module.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __hook_common {
+    ($name:ident, $ret:ty) => {
+            type Handler = ::std::boxed::Box<dyn Fn(&Call) -> $ret + Send + Sync>;
+        static HANDLER: ::std::sync::RwLock<Option<Handler>> = ::std::sync::RwLock::new(None);
+        /// The function to call as "original"; stays valid after
+        /// uninstalling (slot: the old pointer; inline: the leaked
+        /// trampoline), so a call racing an uninstall still works.
+        static ORIGINAL: ::std::sync::atomic::AtomicU32 = ::std::sync::atomic::AtomicU32::new(0);
+        static ACTIVE: ::std::sync::atomic::AtomicBool = ::std::sync::atomic::AtomicBool::new(false);
+        use ::std::sync::atomic::Ordering::SeqCst;
+
+            enum Patch {
+            Slot($crate::hook::SlotPatch),
+            Inline($crate::hook::InlinePatch),
+        }
+
+        /// An active hook; uninstalls when dropped.
+        pub struct Installed(Option<Patch>);
+
+        impl Drop for Installed {
+            fn drop(&mut self) {
+                // Restore the code first, then retire the handler (this
+                // waits for calls still inside it).
+                drop(self.0.take());
+                *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = None;
+                ACTIVE.store(false, SeqCst);
+            }
+        }
+
+        fn claim() -> Result<(), $crate::hook::HookError> {
+            if ACTIVE.swap(true, SeqCst) { Err($crate::hook::HookError::AlreadyInstalled) } else { Ok(()) }
+        }
+
+        /// Points the function-pointer `slot` at this hook.
+        pub fn install_slot(
+            slot: $crate::mem::Ptr32<u32>,
+            handler: impl Fn(&Call) -> $ret + Send + Sync + 'static,
+        ) -> Result<Installed, $crate::hook::HookError> {
+            #[cfg(target_arch = "x86")]
+            {
+                claim()?;
+                let result = (|| {
+                    ORIGINAL.store(slot.read()?, SeqCst);
+                    *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(handler));
+                    $crate::hook::SlotPatch::replace(slot, trampoline as usize as u32)
+                })();
+                result.map(|p| Installed(Some(Patch::Slot(p)))).inspect_err(|_| ACTIVE.store(false, SeqCst))
+            }
+            #[cfg(not(target_arch = "x86"))]
+            { let _ = (slot, handler); Err($crate::hook::HookError::Unsupported) }
+        }
+
+        /// Patches the start of `function`, whose first bytes must be
+        /// exactly `prologue` (>= 5 bytes of self-contained instructions).
+        pub fn install_inline(
+            function: u32,
+            prologue: &[u8],
+            handler: impl Fn(&Call) -> $ret + Send + Sync + 'static,
+        ) -> Result<Installed, $crate::hook::HookError> {
+            #[cfg(target_arch = "x86")]
+            {
+                claim()?;
+                let result = (|| {
+                    $crate::hook::InlinePatch::check(function, prologue)?;
+                    // Handler first: the jump may be taken the moment it
+                    // is written. Until ORIGINAL is set, the trampoline
+                    // cannot be reached (the jump is not written yet).
+                    *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(handler));
+                    $crate::hook::InlinePatch::install(function, prologue, trampoline as usize as u32, |t| {
+                        ORIGINAL.store(t, SeqCst)
+                    })
+                })();
+                result.map(|p| Installed(Some(Patch::Inline(p)))).inspect_err(|_| {
+                    *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = None;
+                    ACTIVE.store(false, SeqCst);
+                })
+            }
+            #[cfg(not(target_arch = "x86"))]
+            { let _ = (function, prologue, handler); Err($crate::hook::HookError::Unsupported) }
+        }
+    };
+}
+
+/// Like [`fastcall_hook!`] for `__stdcall` functions (Win32 APIs, callee
+/// pops the stack arguments):
+///
+/// ```ignore
+/// inproc::stdcall_hook! {
+///     pub mod text_out(hdc, x, y, text, len) -> i32;
+/// }
+/// ```
+#[macro_export]
+macro_rules! stdcall_hook {
+    ($(#[$m:meta])* $vis:vis mod $name:ident($($arg:ident),*) -> $ret:ty;) => {
+        $(#[$m])*
+        $vis mod $name {
+            #![allow(unsafe_code, dead_code, unused_imports)]
+            use super::*;
+
+            /// One invocation of the hooked function.
+            pub struct Call {
+                $(pub $arg: u32,)*
+                original: u32,
+            }
+
+            impl Call {
+                /// Runs the original function with the same arguments.
+                pub fn original(&self) -> $ret {
+                    self.original_with($(self.$arg),*)
+                }
+
+                /// Runs the original function with other arguments.
+                pub fn original_with(&self, $($arg: u32),*) -> $ret {
+                    #[cfg(target_arch = "x86")]
+                    {
+                        type Raw = extern "stdcall" fn($($crate::__ident_u32!($arg)),*) -> $ret;
+                        // SAFETY: `original` is the hooked function, whose
+                        // signature is this macro invocation's contract.
+                        let f: Raw = unsafe { ::core::mem::transmute::<usize, Raw>(self.original as usize) };
+                        f($($arg),*)
+                    }
+                    #[cfg(not(target_arch = "x86"))]
+                    { let _ = ($($arg),*); unreachable!("hooks only run in 32-bit x86 processes") }
+                }
+            }
+
+            #[cfg(target_arch = "x86")]
+            extern "stdcall" fn trampoline($($arg: u32),*) -> $ret {
+                let call = Call { $($arg,)* original: ORIGINAL.load(SeqCst) };
+                let guard = HANDLER.read().unwrap_or_else(|e| e.into_inner());
+                let Some(handler) = guard.as_ref() else { return call.original() };
+                match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| handler(&call))) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        ::log::error!(concat!("hook ", stringify!($name), " panicked; calling original"));
+                        call.original()
+                    }
+                }
+            }
+
+            $crate::__hook_common!($name, $ret);
+        }
+    };
 }
