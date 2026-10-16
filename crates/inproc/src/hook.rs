@@ -388,6 +388,22 @@ macro_rules! __hook_common {
             { let _ = (function, prologue, handler); Err($crate::hook::HookError::Unsupported) }
         }
 
+        /// Patches the start of `function`: like `install_inline` if it
+        /// begins with `prologue`, like `install_over_jmp` if another mod
+        /// (e.g. a newer release of it) redirects it with a `jmp rel32`.
+        pub fn install_at_start(
+            function: u32,
+            prologue: &[u8],
+            handler: impl Fn(&Call) -> $ret + Send + Sync + 'static,
+        ) -> Result<Installed, $crate::hook::HookError> {
+            let first = $crate::mem::Ptr32::<u8>::new(function).read()?;
+            if first == 0xE9 && prologue.first() != Some(&0xE9) {
+                install_over_jmp(function, handler)
+            } else {
+                install_inline(function, prologue, handler)
+            }
+        }
+
         /// Hooks a function another mod already redirects with a `jmp rel32`
         /// at its start (see `InlinePatch::install_over_jmp`).
         pub fn install_over_jmp(
