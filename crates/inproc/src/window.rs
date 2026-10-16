@@ -5,11 +5,12 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::SystemServices::{MK_LBUTTON, MK_MBUTTON, MK_RBUTTON};
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VK_TO_VSC, MapVirtualKeyW};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, MAPVK_VK_TO_VSC, MapVirtualKeyW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClientRect, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-    PostMessageW, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    CS_DBLCLKS, EnumWindows, GCL_STYLE, GetClassLongW, GetClientRect, GetSystemMetrics, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SM_CXDOUBLECLK, SM_CYDOUBLECLK, WM_CHAR, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP,
 };
 
 /// A mouse button.
@@ -101,10 +102,21 @@ impl Window {
         self.post(WM_MOUSEMOVE, held.flags(), lparam_xy(x, y));
     }
 
+    /// Whether the window's class asks for double-click messages.
+    pub fn wants_double_clicks(self) -> bool {
+        // SAFETY: reads a class word; 0 for a stale handle.
+        let style = unsafe { GetClassLongW(self.hwnd(), GCL_STYLE) };
+        style & CS_DBLCLKS != 0
+    }
+
     /// A button went down or up at client position (x, y); `held` is the
-    /// state after the change.
-    pub fn mouse_button(self, button: MouseButton, down: bool, x: i32, y: i32, held: Buttons) {
+    /// state after the change. `double`: the press is the second of a
+    /// double-click (see [`DoubleClicks`]).
+    pub fn mouse_button(self, button: MouseButton, down: bool, double: bool, x: i32, y: i32, held: Buttons) {
         let message = match (button, down) {
+            (MouseButton::Left, true) if double => WM_LBUTTONDBLCLK,
+            (MouseButton::Right, true) if double => WM_RBUTTONDBLCLK,
+            (MouseButton::Middle, true) if double => WM_MBUTTONDBLCLK,
             (MouseButton::Left, true) => WM_LBUTTONDOWN,
             (MouseButton::Left, false) => WM_LBUTTONUP,
             (MouseButton::Right, true) => WM_RBUTTONDOWN,
@@ -141,5 +153,29 @@ impl Window {
         for &u in c.encode_utf16(&mut units).iter() {
             self.post(WM_CHAR, u as WPARAM, 1);
         }
+    }
+}
+
+/// Tells double-clicks from single presses the way the system does for
+/// real input (posted messages are never turned into double-clicks): a
+/// second press of the same button within the double-click time, inside
+/// the double-click rectangle around the first.
+#[derive(Debug, Default)]
+pub struct DoubleClicks {
+    last: Option<(MouseButton, std::time::Instant, i32, i32)>,
+}
+
+impl DoubleClicks {
+    /// A press of `button` at (x, y) now: whether it completes a double-click.
+    pub fn press(&mut self, button: MouseButton, x: i32, y: i32) -> bool {
+        let now = std::time::Instant::now();
+        // SAFETY: plain system queries.
+        let (time, cx, cy) = unsafe { (GetDoubleClickTime(), GetSystemMetrics(SM_CXDOUBLECLK), GetSystemMetrics(SM_CYDOUBLECLK)) };
+        let double = self.last.is_some_and(|(b, t, lx, ly)| {
+            b == button && now.duration_since(t).as_millis() <= time as u128 && (x - lx).abs() <= cx / 2 && (y - ly).abs() <= cy / 2
+        });
+        // A third press starts over.
+        self.last = (!double).then_some((button, now, x, y));
+        double
     }
 }
