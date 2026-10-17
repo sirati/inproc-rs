@@ -577,6 +577,7 @@ macro_rules! __hook_common {
             enum Patch {
             Slot($crate::hook::SlotPatch),
             Inline($crate::hook::InlinePatch),
+            CallSite($crate::hook::CallSitePatch),
         }
 
         /// An active hook; uninstalls when dropped.
@@ -680,6 +681,32 @@ macro_rules! __hook_common {
             }
             #[cfg(not(target_arch = "x86"))]
             { let _ = (function, handler); Err($crate::hook::HookError::Unsupported) }
+        }
+
+        /// Points the `call rel32` at `site` (exactly `expected`) at this
+        /// hook: only that caller is intercepted, and `original` calls the
+        /// function it called. (The function then returns into the hook,
+        /// not to the site: for a callee that looks at its return address,
+        /// hook its caller's call instead.)
+        pub fn install_call_site(
+            site: u32,
+            expected: &[u8; 5],
+            handler: impl Fn(&Call) -> $ret + Send + Sync + 'static,
+        ) -> Result<Installed, $crate::hook::HookError> {
+            #[cfg(target_arch = "x86")]
+            {
+                claim()?;
+                *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(handler));
+                let result = $crate::hook::CallSitePatch::install(site, expected, trampoline as *const () as usize as u32, |callee| {
+                    ORIGINAL.store(callee, SeqCst)
+                });
+                result.map(|p| Installed(Some(Patch::CallSite(p)))).inspect_err(|_| {
+                    *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = None;
+                    ACTIVE.store(false, SeqCst);
+                })
+            }
+            #[cfg(not(target_arch = "x86"))]
+            { let _ = (site, expected, handler); Err($crate::hook::HookError::Unsupported) }
         }
     };
 }
