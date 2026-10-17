@@ -7,10 +7,11 @@ use windows_sys::Win32::System::SystemServices::{MK_LBUTTON, MK_MBUTTON, MK_RBUT
 use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, MAPVK_VK_TO_VSC, MapVirtualKeyW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CS_DBLCLKS, EnumWindows, GCL_STYLE, GetClassLongW, GetClientRect, GetSystemMetrics, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SM_CXDOUBLECLK, SM_CYDOUBLECLK, WM_CHAR, WM_KEYDOWN,
+    CS_DBLCLKS, EnumWindows, GCL_STYLE, GWL_STYLE, GetClassLongW, GetClientRect, GetSystemMetrics, GetWindowLongW, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SW_HIDE, SW_SHOW, ShowWindowAsync, WM_CHAR,
+    WM_KEYDOWN, WS_CHILD,
     WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP,
 };
 
 /// A mouse button.
@@ -52,8 +53,19 @@ impl Window {
 
     /// The visible top-level windows of this process.
     pub fn of_this_process() -> Vec<Window> {
+        Self::search(true)
+    }
+
+    /// The top-level windows of this process, hidden ones too (e.g. kept
+    /// hidden by `crate::hidden`).
+    pub fn all_of_this_process() -> Vec<Window> {
+        Self::search(false)
+    }
+
+    fn search(visible: bool) -> Vec<Window> {
         struct Search {
             pid: u32,
+            visible: bool,
             found: Vec<Window>,
         }
         unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> i32 {
@@ -63,14 +75,14 @@ impl Window {
             let mut pid = 0;
             // SAFETY: plain Win32 queries on a handle the system gave us.
             unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-            if pid == search.pid && unsafe { IsWindowVisible(hwnd) } != 0 {
+            if pid == search.pid && (!search.visible || unsafe { IsWindowVisible(hwnd) } != 0) {
                 search.found.push(Window(hwnd as isize));
             }
             1
         }
         // SAFETY: trivial query.
         let pid = unsafe { GetCurrentProcessId() };
-        let mut search = Search { pid, found: Vec::new() };
+        let mut search = Search { pid, visible, found: Vec::new() };
         // SAFETY: the callback only uses `search` during this call.
         unsafe { EnumWindows(Some(visit), &mut search as *mut Search as LPARAM) };
         search.found
@@ -99,9 +111,49 @@ impl Window {
         (unsafe { ClientToScreen(self.hwnd(), &mut p) } != 0).then_some((p.x, p.y))
     }
 
+    /// Whether the window is shown (`IsWindowVisible`).
+    pub fn is_visible(self) -> bool {
+        // SAFETY: plain query; false for a stale handle.
+        unsafe { IsWindowVisible(self.hwnd()) != 0 }
+    }
+
+    /// Hides the window (`ShowWindowAsync(SW_HIDE)`: its thread does it,
+    /// this one does not wait). It stays a real window: its messages,
+    /// posted input and client size go on as before; a windowing system
+    /// shows nothing of it (Wine's Wayland driver unmaps its surface: it is
+    /// in no task list or switcher).
+    pub fn hide(self) {
+        // SAFETY: asks the window's thread to hide it; harmless for a stale
+        // handle.
+        unsafe { ShowWindowAsync(self.hwnd(), SW_HIDE) };
+    }
+
+    /// Shows the window again (`ShowWindowAsync(SW_SHOW)`).
+    pub fn show(self) {
+        // SAFETY: asks the window's thread to show it; harmless for a stale
+        // handle.
+        unsafe { ShowWindowAsync(self.hwnd(), SW_SHOW) };
+    }
+
+    /// Whether it is a top-level window (not a child of another).
+    pub(crate) fn is_top_level(self) -> bool {
+        // SAFETY: plain query; 0 for a stale handle.
+        self.0 != 0 && unsafe { GetWindowLongW(self.hwnd(), GWL_STYLE) } as u32 & WS_CHILD == 0
+    }
+
     /// The window handle as a number (what Win32 calls return for it).
     pub(crate) fn handle(self) -> u32 {
         self.0 as u32
+    }
+
+    /// The window of handle `h` (as Win32 calls pass it).
+    pub(crate) fn from_handle(h: u32) -> Window {
+        Window(h as i32 as isize)
+    }
+
+    /// Posts a paint message (for a hidden window, see `crate::paint`).
+    pub(crate) fn post_paint(self) {
+        self.post(WM_PAINT, 0, 0);
     }
 
     fn post(self, message: u32, wparam: WPARAM, lparam: LPARAM) {

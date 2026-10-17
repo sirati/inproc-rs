@@ -15,6 +15,13 @@
 //! * `window`: find the process's main window and post input messages to it.
 //! * `pointer`: what a module of the program learns of the pointer and the
 //!   keyboard focus (`GetCursorPos`, `GetFocus`), overridable.
+//! * `screen`: what it learns of the screen's size (`GetSystemMetrics`),
+//!   overridable.
+//! * `paint`: its hidden windows painted as if shown.
+//! * `hidden`: its top-level windows kept hidden from the start.
+//! * `loader`: the libraries it loads, as it loads them.
+//! * `wine`: whether it runs under Wine, Unix paths as its Windows ones.
+//! * `dpi`: our own thread's DPI awareness, not the program's.
 //! * [`entry!`]: the DLL entry point, which runs the client's initialisation
 //!   on a fresh thread, outside the loader lock, with panics caught.
 //!
@@ -25,7 +32,15 @@ pub mod hook;
 pub mod logging;
 pub mod mem;
 #[cfg(windows)]
+pub mod dpi;
+#[cfg(windows)]
 pub mod gdi;
+#[cfg(windows)]
+pub mod hidden;
+#[cfg(windows)]
+pub mod loader;
+#[cfg(windows)]
+pub mod paint;
 #[cfg(windows)]
 pub mod pe;
 #[cfg(windows)]
@@ -33,7 +48,11 @@ pub mod pointer;
 #[cfg(windows)]
 pub mod process;
 #[cfg(windows)]
+pub mod screen;
+#[cfg(windows)]
 pub mod window;
+#[cfg(windows)]
+pub mod wine;
 #[cfg(windows)]
 #[doc(hidden)]
 pub mod dll;
@@ -42,7 +61,10 @@ pub use logging::log_to_file;
 pub use mem::{MemError, Ptr32};
 
 /// Defines the DLL's entry point. `init` runs once, on its own thread, after
-/// the DLL is loaded; panics in it are caught and logged.
+/// the DLL is loaded; panics in it are caught and logged. `early`, if given,
+/// runs before, in `DllMain` itself (under the loader lock: before the
+/// program's own code runs on, for redirecting what it asks the system
+/// first; it must not load libraries or wait for threads).
 ///
 /// ```ignore
 /// inproc::entry!(my_init);
@@ -51,6 +73,9 @@ pub use mem::{MemError, Ptr32};
 #[macro_export]
 macro_rules! entry {
     ($init:path) => {
+        $crate::entry!($init, early = $crate::dll::nothing);
+    };
+    ($init:path, early = $early:path) => {
         #[cfg(windows)]
         #[doc(hidden)]
         #[allow(unsafe_code)]
@@ -60,7 +85,7 @@ macro_rules! entry {
             reason: u32,
             reserved: *mut ::core::ffi::c_void,
         ) -> i32 {
-            $crate::dll::dll_main(module, reason, reserved, $init)
+            $crate::dll::dll_main(module, reason, reserved, $init, $early)
         }
     };
 }

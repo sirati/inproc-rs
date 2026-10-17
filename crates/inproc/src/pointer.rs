@@ -7,7 +7,8 @@
 //!
 //! [`hook_cursor_pos`] and [`hook_focus`] redirect a module's imports of the
 //! two functions; while an [`Override`] is [`set`], they answer with it, else
-//! the system's answer passes through unchanged.
+//! the system's answer passes through unchanged, but for the focus of a
+//! window kept hidden ([`keep_focus`]).
 //!
 //! [`hook_set_cursor`] watches which pointer a module shows (`SetCursor`):
 //! [`last_set_cursor`] tells, [`standard_cursor`] names it if it is one of
@@ -55,6 +56,15 @@ fn current() -> Option<Override> {
     *OVERRIDE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+static KEPT_FOCUS: Mutex<Option<Window>> = Mutex::new(None);
+
+/// Has `GetFocus` report `window` (`None`: no longer) while the system says
+/// no window has the focus: for a window kept hidden that still takes the
+/// keyboard (posted to it), a hidden window never having the focus.
+pub fn keep_focus(window: Option<Window>) {
+    *KEPT_FOCUS.lock().unwrap_or_else(|e| e.into_inner()) = window;
+}
+
 /// A redirected import; restored when dropped.
 pub struct Hook(Hooked);
 
@@ -97,13 +107,16 @@ pub fn hook_cursor_pos(module: u32) -> Result<Option<Hook>, HookError> {
 }
 
 /// Redirects `module`'s `GetFocus` import: under an override it reports the
-/// override's window. `None` if the module does not import it. Once per
-/// process.
+/// override's window; with no window focused, the one [`keep_focus`] keeps.
+/// `None` if the module does not import it. Once per process.
 pub fn hook_focus(module: u32) -> Result<Option<Hook>, HookError> {
     let Some(slot) = slot(module, "GetFocus")? else { return Ok(None) };
     let installed = get_focus::install_slot(slot, |call| match current() {
         Some(o) => o.window.handle(),
-        None => call.original(),
+        None => match call.original() {
+            0 => KEPT_FOCUS.lock().unwrap_or_else(|e| e.into_inner()).map_or(0, |w| w.handle()),
+            focused => focused,
+        },
     })?;
     Ok(Some(Hook(Hooked::Focus(installed))))
 }

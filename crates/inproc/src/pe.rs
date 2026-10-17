@@ -18,10 +18,17 @@ pub fn main_module() -> u32 {
     unsafe { GetModuleHandleA(std::ptr::null()) as usize as u32 }
 }
 
+/// The NUL-terminated name at `at` (at most 256 bytes), read a byte at a
+/// time: a name may end right at the end of its module's mapped memory.
 fn c_string(at: Ptr32<u8>) -> Result<String, MemError> {
-    let bytes = at.read_array(64)?;
-    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    Ok(String::from_utf8_lossy(&bytes[..end]).into_owned())
+    let mut bytes = Vec::new();
+    for i in 0..256 {
+        match at.offset::<u8>(i)?.read()? {
+            0 => break,
+            b => bytes.push(b),
+        }
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// The import address table slot through which `module` calls
