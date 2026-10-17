@@ -37,7 +37,7 @@ pub mod dpi;
 pub mod gdi;
 #[cfg(windows)]
 pub mod hidden;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 pub mod loader;
 #[cfg(windows)]
 pub mod paint;
