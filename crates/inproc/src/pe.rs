@@ -12,6 +12,12 @@ pub fn module_base(name: &str) -> Option<u32> {
     (!h.is_null()).then_some(h as usize as u32)
 }
 
+/// Base address of the process's executable.
+pub fn main_module() -> u32 {
+    // SAFETY: NULL asks for the executable's handle, which always exists.
+    unsafe { GetModuleHandleA(std::ptr::null()) as usize as u32 }
+}
+
 fn c_string(at: Ptr32<u8>) -> Result<String, MemError> {
     let bytes = at.read_array(64)?;
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());

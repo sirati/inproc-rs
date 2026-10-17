@@ -477,7 +477,7 @@ macro_rules! call_site_hook {
                     if ACTIVE.swap(true, SeqCst) {
                         return Err($crate::hook::HookError::AlreadyInstalled);
                     }
-                    let result = $crate::hook::CallSitePatch::install(site, expected, detour as usize as u32, |callee| {
+                    let result = $crate::hook::CallSitePatch::install(site, expected, detour as *const () as usize as u32, |callee| {
                         ORIGINAL.store(callee, SeqCst);
                         HANDLER.store(handler as usize, SeqCst);
                     });
@@ -607,7 +607,7 @@ macro_rules! __hook_common {
                 let result = (|| {
                     ORIGINAL.store(slot.read()?, SeqCst);
                     *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(handler));
-                    $crate::hook::SlotPatch::replace(slot, trampoline as usize as u32)
+                    $crate::hook::SlotPatch::replace(slot, trampoline as *const () as usize as u32)
                 })();
                 result.map(|p| Installed(Some(Patch::Slot(p)))).inspect_err(|_| ACTIVE.store(false, SeqCst))
             }
@@ -631,7 +631,7 @@ macro_rules! __hook_common {
                     // is written. Until ORIGINAL is set, the trampoline
                     // cannot be reached (the jump is not written yet).
                     *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(handler));
-                    $crate::hook::InlinePatch::install(function, prologue, trampoline as usize as u32, |t| {
+                    $crate::hook::InlinePatch::install(function, prologue, trampoline as *const () as usize as u32, |t| {
                         ORIGINAL.store(t, SeqCst)
                     })
                 })();
@@ -670,7 +670,7 @@ macro_rules! __hook_common {
             {
                 claim()?;
                 *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(handler));
-                let result = $crate::hook::InlinePatch::install_over_jmp(function, trampoline as usize as u32, |t| {
+                let result = $crate::hook::InlinePatch::install_over_jmp(function, trampoline as *const () as usize as u32, |t| {
                     ORIGINAL.store(t, SeqCst)
                 });
                 result.map(|p| Installed(Some(Patch::Inline(p)))).inspect_err(|_| {

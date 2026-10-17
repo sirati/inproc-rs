@@ -92,6 +92,18 @@ impl Window {
             .then(|| ((r.right - r.left).max(0) as u32, (r.bottom - r.top).max(0) as u32))
     }
 
+    /// Client position (x, y) in screen coordinates.
+    pub fn client_to_screen(self, x: i32, y: i32) -> Option<(i32, i32)> {
+        let mut p = POINT { x, y };
+        // SAFETY: writes only `p`; fails cleanly for a stale handle.
+        (unsafe { ClientToScreen(self.hwnd(), &mut p) } != 0).then_some((p.x, p.y))
+    }
+
+    /// The window handle as a number (what Win32 calls return for it).
+    pub(crate) fn handle(self) -> u32 {
+        self.0 as u32
+    }
+
     fn post(self, message: u32, wparam: WPARAM, lparam: LPARAM) {
         // SAFETY: posting copies plain values into the target's queue.
         unsafe { PostMessageW(self.hwnd(), message, wparam, lparam) };

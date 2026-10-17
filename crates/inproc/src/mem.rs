@@ -13,6 +13,8 @@ pub enum MemError {
     Unreadable { addr: u64, len: usize },
     #[error("address arithmetic overflow")]
     Overflow,
+    #[error("cannot write {len} bytes at {addr:#x}")]
+    Unwritable { addr: u64, len: usize },
 }
 
 /// A pointer into a 32-bit foreign program's memory, typed as `T`.
@@ -100,6 +102,11 @@ impl<T: Pod> Ptr32<T> {
         Ok(value)
     }
 
+    /// Copies `value` in (e.g. into a buffer a foreign caller handed over).
+    pub fn write(self, value: &T) -> Result<(), MemError> {
+        write_bytes(self.addr as u64, bytemuck::bytes_of(value))
+    }
+
     /// Copies `n` consecutive values out.
     pub fn read_array(self, n: usize) -> Result<Vec<T>, MemError> {
         let mut values = vec![T::zeroed(); n];
@@ -120,10 +127,23 @@ pub fn read_bytes(addr: u64, out: &mut [u8]) -> Result<(), MemError> {
     imp::read(addr, out)
 }
 
+/// Copies `bytes` to address `addr` of this process (writable memory only:
+/// no protection is changed).
+pub fn write_bytes(addr: u64, bytes: &[u8]) -> Result<(), MemError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    if addr == 0 {
+        return Err(MemError::Null);
+    }
+    addr.checked_add(bytes.len() as u64).ok_or(MemError::Overflow)?;
+    imp::write(addr, bytes)
+}
+
 #[cfg(windows)]
 mod imp {
     use super::MemError;
-    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
     pub fn read(addr: u64, out: &mut [u8]) -> Result<(), MemError> {
@@ -141,6 +161,19 @@ mod imp {
         }
         Ok(())
     }
+
+    pub fn write(addr: u64, bytes: &[u8]) -> Result<(), MemError> {
+        let dst = usize::try_from(addr).map_err(|_| MemError::Unwritable { addr, len: bytes.len() })?;
+        let mut done = 0usize;
+        // SAFETY: `bytes` is a valid buffer of `bytes.len()` bytes, only
+        // read. The destination is never dereferenced by us: the kernel
+        // validates it and fails on unmapped or read-only pages.
+        let ok = unsafe { WriteProcessMemory(GetCurrentProcess(), dst as *const _, bytes.as_ptr().cast(), bytes.len(), &mut done) };
+        if ok == 0 || done != bytes.len() {
+            return Err(MemError::Unwritable { addr, len: bytes.len() });
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(windows))]
@@ -151,6 +184,10 @@ mod imp {
     /// test their pure logic; there is no foreign memory to read.
     pub fn read(addr: u64, out: &mut [u8]) -> Result<(), MemError> {
         Err(MemError::Unreadable { addr, len: out.len() })
+    }
+
+    pub fn write(addr: u64, bytes: &[u8]) -> Result<(), MemError> {
+        Err(MemError::Unwritable { addr, len: bytes.len() })
     }
 }
 
@@ -167,5 +204,18 @@ mod tests {
         assert_eq!(p.read_array(3).unwrap(), vec![7, 8, 9]);
         assert_eq!(Ptr32::<u32>::NULL.read(), Err(MemError::Null));
         assert!(matches!(Ptr32::<u32>::new(16).read(), Err(MemError::Unreadable { .. })));
+    }
+
+    #[test]
+    fn writes_own_memory_and_rejects_garbage() {
+        let mut data: [i32; 2] = [0, 0];
+        let p = Ptr32::<[i32; 2]>::new(data.as_mut_ptr() as u32);
+        p.write(&[5, -6]).unwrap();
+        assert_eq!(std::hint::black_box(&data), &[5, -6]);
+        assert_eq!(Ptr32::<u32>::NULL.write(&1), Err(MemError::Null));
+        assert!(matches!(Ptr32::<u32>::new(16).write(&1), Err(MemError::Unwritable { .. })));
+        // Code is not writable.
+        let code = Ptr32::<u8>::new(writes_own_memory_and_rejects_garbage as usize as u32);
+        assert!(matches!(code.write(&0xCC), Err(MemError::Unwritable { .. })));
     }
 }

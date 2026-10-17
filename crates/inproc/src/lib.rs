@@ -13,6 +13,8 @@
 //! * [`hook`]: replace a function pointer in a vtable (or any pointer-sized
 //!   slot) and restore it when the guard is dropped.
 //! * `window`: find the process's main window and post input messages to it.
+//! * `pointer`: what a module of the program learns of the pointer and the
+//!   keyboard focus (`GetCursorPos`, `GetFocus`), overridable.
 //! * [`entry!`]: the DLL entry point, which runs the client's initialisation
 //!   on a fresh thread, outside the loader lock, with panics caught.
 //!
@@ -26,6 +28,8 @@ pub mod mem;
 pub mod gdi;
 #[cfg(windows)]
 pub mod pe;
+#[cfg(windows)]
+pub mod pointer;
 #[cfg(windows)]
 pub mod process;
 #[cfg(windows)]
