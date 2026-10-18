@@ -48,6 +48,15 @@ pub fn hook_load_library(module: u32, loaded: impl Fn(&str, u32) + Send + Sync +
     Ok(Some(Hook(installed)))
 }
 
+/// Runs mandatory preparation for every caller before claiming one-time
+/// module setup. `prepare` must serialize shared import installation itself;
+/// a previous claim never skips this caller's preparation. Returns true only
+/// to the first claimant, without waiting for its remaining setup to finish.
+pub fn prepare_before_claim(base: u32, claimed: &std::sync::atomic::AtomicU32, prepare: impl FnOnce()) -> bool {
+    prepare();
+    claimed.swap(base, std::sync::atomic::Ordering::SeqCst) == 0
+}
+
 /// Complete import redirection on the caller's loading thread, after the
 /// module is mapped but before control returns to its first caller.
 fn load_then_notify(load: impl FnOnce() -> u32, path: impl FnOnce() -> Option<String>, loaded: impl FnOnce(&str, u32)) -> u32 {
@@ -65,7 +74,7 @@ fn load_then_notify(load: impl FnOnce() -> u32, path: impl FnOnce() -> Option<St
 
 #[cfg(test)]
 mod tests {
-    use super::load_then_notify;
+    use super::{load_then_notify, prepare_before_claim};
     use std::cell::{Cell, RefCell};
 
     #[test]
@@ -87,6 +96,83 @@ mod tests {
         assert!(patched.get(), "the first text output must already be intercepted");
         events.borrow_mut().push("first text output");
         assert_eq!(*events.borrow(), ["library mapped", "text import patched", "first text output"]);
+    }
+
+    fn concurrent_preparation(second_already_loaded: bool) {
+        use std::sync::{Arc, Mutex, mpsc};
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::thread;
+        use std::time::Duration;
+
+        #[derive(Debug)]
+        enum Progress { Preparing, Returned }
+
+        let claimed = Arc::new(AtomicU32::new(0));
+        let installed = Arc::new(AtomicBool::new(false));
+        let text_install = Arc::new(Mutex::new(()));
+        let (first_preparing, first_entered) = mpsc::channel();
+        let (release_first, released) = mpsc::channel();
+        let (second_progress, progress) = mpsc::channel();
+        let timeout = Duration::from_secs(5);
+        let first = {
+            let (claimed, installed, text_install) = (claimed.clone(), installed.clone(), text_install.clone());
+            thread::spawn(move || {
+                let mut owns_setup = false;
+                assert_eq!(load_then_notify(|| 0x1000, || Some("JGL.DLL".into()), |_, base| {
+                    owns_setup = prepare_before_claim(base, &claimed, || {
+                        let _guard = text_install.lock().unwrap();
+                        first_preparing.send(()).unwrap();
+                        released.recv_timeout(timeout).unwrap();
+                        installed.store(true, Ordering::Release);
+                    });
+                }), 0x1000);
+                (owns_setup, installed.load(Ordering::Acquire))
+            })
+        };
+        // Suspend the first caller during serialized import installation.
+        // A once-only claim must not let another load return around it.
+        first_entered.recv_timeout(timeout).unwrap();
+        let second = {
+            let (claimed, installed) = (claimed.clone(), installed.clone());
+            thread::spawn(move || {
+                let mut owns_setup = false;
+                let mut loaded = |_: &str, base| {
+                    owns_setup = prepare_before_claim(base, &claimed, || {
+                        second_progress.send(Progress::Preparing).unwrap();
+                        let _guard = text_install.lock().unwrap();
+                        assert!(installed.load(Ordering::Acquire));
+                    });
+                };
+                if second_already_loaded {
+                    // The early setup's already-loaded check uses the same
+                    // mandatory preparation as each LoadLibrary callback.
+                    loaded("jgl.dll", 0x1000);
+                } else {
+                    assert_eq!(load_then_notify(|| 0x1000, || Some("jgl".into()), loaded), 0x1000);
+                }
+                second_progress.send(Progress::Returned).unwrap();
+                (owns_setup, installed.load(Ordering::Acquire))
+            })
+        };
+        let observed = progress.recv_timeout(timeout);
+        // Release/join both threads before asserting, including if a future
+        // regression lets the second caller skip preparation and return.
+        release_first.send(()).unwrap();
+        let (first_owner, first_ready) = first.join().unwrap();
+        let (second_owner, second_ready) = second.join().unwrap();
+        assert!(matches!(observed, Ok(Progress::Preparing)), "second caller skipped mandatory preparation: {observed:?}");
+        assert!(first_ready && second_ready, "every returning caller must see the text import installed");
+        assert_ne!(first_owner, second_owner, "only one caller owns the remaining module setup");
+    }
+
+    #[test]
+    fn simultaneous_library_loads_both_finish_text_preparation_before_returning() {
+        concurrent_preparation(false);
+    }
+
+    #[test]
+    fn already_loaded_setup_cannot_bypass_another_callers_text_preparation() {
+        concurrent_preparation(true);
     }
 
     #[test]
