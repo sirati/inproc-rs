@@ -30,6 +30,8 @@
 
 pub mod hook;
 pub mod logging;
+#[cfg(windows)]
+pub mod message;
 pub mod mem;
 #[cfg(windows)]
 pub mod dpi;

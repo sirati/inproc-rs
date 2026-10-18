@@ -161,6 +161,13 @@ impl Window {
         unsafe { PostMessageW(self.hwnd(), message, wparam, lparam) };
     }
 
+    /// Posts a private application message in input queue order.
+    /// False means the window no longer exists or its queue rejected it.
+    pub fn post_message(self, message: u32, token: u32) -> bool {
+        // SAFETY: the system copies these plain values into the queue.
+        unsafe { PostMessageW(self.hwnd(), message, token as WPARAM, 0) != 0 }
+    }
+
     /// Wakes the window's thread if it waits for messages (`WaitMessage`):
     /// posts a message that does nothing.
     pub fn wake(self) {

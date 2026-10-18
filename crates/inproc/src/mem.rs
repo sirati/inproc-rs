@@ -145,6 +145,11 @@ mod imp {
     use super::MemError;
     use windows_sys::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE,
+        PAGE_EXECUTE_WRITECOPY, PAGE_GUARD, PAGE_READWRITE, PAGE_WRITECOPY,
+        VirtualQuery,
+    };
 
     pub fn read(addr: u64, out: &mut [u8]) -> Result<(), MemError> {
         let src = usize::try_from(addr).map_err(|_| MemError::Unreadable { addr, len: out.len() })?;
@@ -164,10 +169,30 @@ mod imp {
 
     pub fn write(addr: u64, bytes: &[u8]) -> Result<(), MemError> {
         let dst = usize::try_from(addr).map_err(|_| MemError::Unwritable { addr, len: bytes.len() })?;
+        let denied = || MemError::Unwritable { addr, len: bytes.len() };
+        let end = dst.checked_add(bytes.len()).ok_or_else(denied)?;
+        let mut cursor = dst;
+        // WriteProcessMemory is a debugger API: Windows and Wine can make
+        // executable pages writable temporarily. Check the whole range first
+        // so ordinary data writes cannot silently become code patches.
+        while cursor < end {
+            let mut region: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+            // SAFETY: VirtualQuery validates the foreign address and writes
+            // only this correctly sized local information structure.
+            let queried = unsafe { VirtualQuery(cursor as *const _, &mut region, size_of::<MEMORY_BASIC_INFORMATION>()) };
+            if queried == 0 || region.State != MEM_COMMIT || region.Protect & PAGE_GUARD != 0
+                || !matches!(region.Protect & 0xFF,
+                    PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)
+            {
+                return Err(denied());
+            }
+            let next = (region.BaseAddress as usize).checked_add(region.RegionSize).ok_or_else(denied)?;
+            if next <= cursor { return Err(denied()); }
+            cursor = next.min(end);
+        }
         let mut done = 0usize;
-        // SAFETY: `bytes` is a valid buffer of `bytes.len()` bytes, only
-        // read. The destination is never dereferenced by us: the kernel
-        // validates it and fails on unmapped or read-only pages.
+        // SAFETY: `bytes` is a valid input buffer. The destination is never
+        // dereferenced by us, and the OS still validates the actual copy.
         let ok = unsafe { WriteProcessMemory(GetCurrentProcess(), dst as *const _, bytes.as_ptr().cast(), bytes.len(), &mut done) };
         if ok == 0 || done != bytes.len() {
             return Err(MemError::Unwritable { addr, len: bytes.len() });
@@ -215,7 +240,31 @@ mod tests {
         assert_eq!(Ptr32::<u32>::NULL.write(&1), Err(MemError::Null));
         assert!(matches!(Ptr32::<u32>::new(16).write(&1), Err(MemError::Unwritable { .. })));
         // Code is not writable.
-        let code = Ptr32::<u8>::new(writes_own_memory_and_rejects_garbage as usize as u32);
+        let code = Ptr32::<u8>::new(writes_own_memory_and_rejects_garbage as *const () as usize as u32);
         assert!(matches!(code.write(&0xCC), Err(MemError::Unwritable { .. })));
     }
+    #[test]
+    fn writes_reject_a_read_only_tail_before_changing_the_writable_prefix() {
+        use windows_sys::Win32::System::Memory::{
+            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READONLY, PAGE_READWRITE,
+            VirtualAlloc, VirtualFree, VirtualProtect,
+        };
+        // Windows allocation pages are at least 4 KiB. This test creates
+        // two pages with independently controlled protection.
+        let allocation = unsafe { VirtualAlloc(std::ptr::null(), 8192, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) };
+        assert!(!allocation.is_null());
+        struct Pages(*mut std::ffi::c_void);
+        impl Drop for Pages { fn drop(&mut self) { unsafe { VirtualFree(self.0, 0, MEM_RELEASE); } } }
+        let _pages = Pages(allocation);
+        let start = allocation as u32;
+        let boundary = Ptr32::<[u8; 2]>::new(start + 4095);
+        boundary.write(&[7, 8]).unwrap();
+        let mut old = 0;
+        assert_ne!(unsafe { VirtualProtect(allocation.add(4096), 4096, PAGE_READONLY, &mut old) }, 0);
+        assert!(matches!(boundary.write(&[9, 10]), Err(MemError::Unwritable { .. })));
+        assert_eq!(boundary.read().unwrap(), [7, 8]);
+        assert!(matches!(Ptr32::<u8>::new(start + 4096).write(&11), Err(MemError::Unwritable { .. })));
+        assert_eq!(Ptr32::<u8>::new(start + 4096).read().unwrap(), 8);
+    }
+
 }

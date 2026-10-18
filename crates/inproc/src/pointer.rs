@@ -171,3 +171,51 @@ pub fn standard_cursor(handle: u32) -> Option<u16> {
         !h.is_null() && h as usize as u32 == handle
     })
 }
+
+
+/// A rectangular system-pointer confinement in screen coordinates,
+/// `[left, top, right, bottom]`. Releasing or dropping it only removes the
+/// rectangle this instance installed, so a later clip from another window
+/// is left alone. The caller releases before losing focus or handing the
+/// pointer to another capture mechanism.
+#[derive(Default)]
+pub struct Confinement {
+    screen: Option<[i32; 4]>,
+}
+
+impl Confinement {
+    /// Installs a nonempty rectangle, or releases with `None`. Returns
+    /// whether a requested rectangle was installed successfully.
+    pub fn set(&mut self, screen: Option<[i32; 4]>) -> bool {
+        use windows_sys::Win32::Foundation::RECT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::ClipCursor;
+        let Some(screen) = screen.filter(|r| r[2] > r[0] && r[3] > r[1]) else { self.release(); return false };
+        if self.screen == Some(screen) { return true; }
+        let rect = RECT { left: screen[0], top: screen[1], right: screen[2], bottom: screen[3] };
+        // SAFETY: ClipCursor reads a valid RECT for the duration of this call.
+        if unsafe { ClipCursor(&rect) } != 0 {
+            self.screen = Some(screen);
+            return true;
+        }
+        false
+    }
+
+    /// Releases this instance's rectangle, unless another window has
+    /// already replaced the global clip with its own rectangle.
+    pub fn release(&mut self) {
+        use windows_sys::Win32::Foundation::RECT;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{ClipCursor, GetClipCursor};
+        let Some(screen) = self.screen.take() else { return };
+        let mut current = RECT::default();
+        // SAFETY: GetClipCursor writes one valid RECT; null releases the clip.
+        unsafe {
+            if GetClipCursor(&mut current) != 0 && [current.left, current.top, current.right, current.bottom] == screen {
+                ClipCursor(std::ptr::null());
+            }
+        }
+    }
+}
+
+impl Drop for Confinement {
+    fn drop(&mut self) { self.release(); }
+}
