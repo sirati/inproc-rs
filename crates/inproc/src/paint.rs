@@ -9,8 +9,8 @@
 //! paint reports the kept area as the one to paint (the system's would be
 //! empty). Visible windows are painted by the system as always.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::hook::HookError;
 use crate::mem::Ptr32;
@@ -26,9 +26,28 @@ crate::stdcall_hook! {
     mod begin_paint(hwnd, paint) -> u32;
 }
 
-/// Per hidden window (its handle): the area to paint (left, top, right,
-/// bottom), with a `WM_PAINT` posted for it.
-static PENDING: Mutex<Option<HashMap<u32, [i32; 4]>>> = Mutex::new(None);
+/// A hidden window's area to paint, handed from whichever thread
+/// invalidates it to the window's thread painting it, without a lock.
+struct Hidden {
+    /// The window's handle, 0 while the entry is free.
+    window: AtomicU32,
+    /// A `WM_PAINT` was posted and its `BeginPaint` has not run yet.
+    waiting: AtomicBool,
+    /// Rectangles (left, top, right, bottom) invalidated since.
+    rects: civ3r_sync::Mailbox<[i32; 4]>,
+}
+
+/// More hidden windows than a program paints.
+static HIDDEN: LazyLock<[Hidden; 8]> = LazyLock::new(|| {
+    std::array::from_fn(|_| Hidden { window: AtomicU32::new(0), waiting: AtomicBool::new(false), rects: civ3r_sync::Mailbox::new() })
+});
+
+fn hidden(window: u32, claim: bool) -> Option<&'static Hidden> {
+    let table = &*HIDDEN;
+    table.iter().find(|h| h.window.load(Ordering::Acquire) == window).or_else(|| {
+        claim.then(|| table.iter().find(|h| h.window.compare_exchange(0, window, Ordering::AcqRel, Ordering::Acquire).is_ok() || h.window.load(Ordering::Acquire) == window)).flatten()
+    })
+}
 
 /// Adds `rect` to what `window` has to paint; posts a paint message unless
 /// one is waiting already.
@@ -36,15 +55,24 @@ fn invalidate(window: Window, rect: [i32; 4]) {
     if rect[2] <= rect[0] || rect[3] <= rect[1] {
         return;
     }
-    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
-    let pending = pending.get_or_insert_with(HashMap::new);
-    match pending.get_mut(&window.handle()) {
-        Some(r) => *r = [r[0].min(rect[0]), r[1].min(rect[1]), r[2].max(rect[2]), r[3].max(rect[3])],
-        None => {
-            pending.insert(window.handle(), rect);
-            window.post_paint();
-        }
+    let Some(entry) = hidden(window.handle(), true) else {
+        window.post_paint();
+        return;
+    };
+    entry.rects.send(rect);
+    // Sent before the flag: a paint that cleared it drains this rect or a
+    // new message is posted for it.
+    if !entry.waiting.swap(true, Ordering::AcqRel) {
+        window.post_paint();
     }
+}
+
+/// On the window's thread, inside `BeginPaint`: everything invalidated.
+fn take_pending(window: u32) -> Option<[i32; 4]> {
+    let entry = hidden(window, false)?;
+    // Acquires the invalidations that set the flag before draining them.
+    entry.waiting.swap(false, Ordering::AcqRel);
+    entry.rects.drain().reduce(|r, n| [r[0].min(n[0]), r[1].min(n[1]), r[2].max(n[2]), r[3].max(n[3])])
 }
 
 /// The whole client area of `window`.
@@ -90,7 +118,7 @@ pub fn hook_hidden_painting(module: u32) -> Result<Option<Hooks>, HookError> {
     })?;
     let begun = begin_paint::install_slot(begin_slot, |call| {
         let dc = call.original();
-        let pending = PENDING.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|p| p.remove(&call.hwnd));
+        let pending = take_pending(call.hwnd);
         if let (Some(rect), false) = (pending, Window::from_handle(call.hwnd).is_visible()) {
             // PAINTSTRUCT: hdc, fErase, then rcPaint.
             let _ = Ptr32::<[i32; 4]>::new(call.paint).offset::<[i32; 4]>(8).and_then(|p| p.write(&rect));

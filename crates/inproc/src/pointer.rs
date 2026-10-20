@@ -12,9 +12,16 @@
 //!
 //! [`hook_set_cursor`] watches which pointer a module shows (`SetCursor`):
 //! [`last_set_cursor`] tells, [`standard_cursor`] names it if it is one of
-//! the system's own.
+//! the system's own. While the module's windows are kept hidden
+//! (`crate::hidden`) it never hides the system pointer (`SetCursor(NULL)`,
+//! [`hook_show_cursor`]): another window shows the program, and the pointer
+//! there is that window's (Wine's macOS driver hides the pointer for the
+//! whole application, a viewer in the same process included).
+//!
+//! For our own windows: [`Confinement`] clips the system pointer to a
+//! rectangle; [`cursor_base_size`] and [`cursor_metric_size`] tell the
+//! user's pointer size.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::hook::HookError;
@@ -36,6 +43,11 @@ crate::stdcall_hook! {
     mod set_cursor(cursor) -> u32;
 }
 
+crate::stdcall_hook! {
+    /// `int ShowCursor(BOOL)`.
+    mod show_cursor(show) -> i32;
+}
+
 /// The pointer at client position (`x`, `y`) of `window`, which has the
 /// keyboard focus.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -45,24 +57,29 @@ pub struct Override {
     pub y: i32,
 }
 
-static OVERRIDE: Mutex<Option<Override>> = Mutex::new(None);
+/// Read by the hooked imports on the game's thread without waiting.
+static OVERRIDE: civ3r_sync::Latest<Override> = civ3r_sync::Latest::new();
 
 /// Sets (or with `None` ends) the override the hooked imports answer with.
 pub fn set(o: Option<Override>) {
-    *OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = o;
+    match o {
+        Some(o) => OVERRIDE.publish(o),
+        None => OVERRIDE.clear(),
+    }
 }
 
 fn current() -> Option<Override> {
-    *OVERRIDE.lock().unwrap_or_else(|e| e.into_inner())
+    OVERRIDE.get()
 }
 
-static KEPT_FOCUS: Mutex<Option<Window>> = Mutex::new(None);
+/// The kept window's handle, 0 for none.
+static KEPT_FOCUS: AtomicU32 = AtomicU32::new(0);
 
 /// Has `GetFocus` report `window` (`None`: no longer) while the system says
 /// no window has the focus: for a window kept hidden that still takes the
 /// keyboard (posted to it), a hidden window never having the focus.
 pub fn keep_focus(window: Option<Window>) {
-    *KEPT_FOCUS.lock().unwrap_or_else(|e| e.into_inner()) = window;
+    KEPT_FOCUS.store(window.map_or(0, |w| w.handle()), Ordering::Release);
 }
 
 /// A redirected import; restored when dropped.
@@ -72,6 +89,7 @@ enum Hooked {
     CursorPos(#[allow(dead_code)] get_cursor_pos::Installed),
     Focus(#[allow(dead_code)] get_focus::Installed),
     SetCursor(#[allow(dead_code)] set_cursor::Installed),
+    ShowCursor(#[allow(dead_code)] show_cursor::Installed),
 }
 
 impl std::fmt::Debug for Hook {
@@ -80,6 +98,7 @@ impl std::fmt::Debug for Hook {
             Hooked::CursorPos(_) => "Hook(GetCursorPos)",
             Hooked::Focus(_) => "Hook(GetFocus)",
             Hooked::SetCursor(_) => "Hook(SetCursor)",
+            Hooked::ShowCursor(_) => "Hook(ShowCursor)",
         })
     }
 }
@@ -114,7 +133,7 @@ pub fn hook_focus(module: u32) -> Result<Option<Hook>, HookError> {
     let installed = get_focus::install_slot(slot, |call| match current() {
         Some(o) => o.window.handle(),
         None => match call.original() {
-            0 => KEPT_FOCUS.lock().unwrap_or_else(|e| e.into_inner()).map_or(0, |w| w.handle()),
+            0 => KEPT_FOCUS.load(Ordering::Acquire),
             focused => focused,
         },
     })?;
@@ -126,15 +145,47 @@ pub fn hook_focus(module: u32) -> Result<Option<Hook>, HookError> {
 static LAST_SET: AtomicU32 = AtomicU32::new(0);
 
 /// Watches `module`'s `SetCursor` import: the handle it sets is kept for
-/// [`last_set_cursor`] (the call goes on unchanged). `None` if the module
-/// does not import it. Once per process.
+/// [`last_set_cursor`]; the call goes on, but for hiding the pointer while
+/// the module's windows are kept hidden ([`keeps_pointer_shown`]: then it
+/// only answers with the handle set before). `None` if the module does not
+/// import it. Once per process.
 pub fn hook_set_cursor(module: u32) -> Result<Option<Hook>, HookError> {
     let Some(slot) = slot(module, "SetCursor")? else { return Ok(None) };
     let installed = set_cursor::install_slot(slot, |call| {
-        LAST_SET.store(call.cursor, Ordering::Relaxed);
+        let before = LAST_SET.swap(call.cursor, Ordering::Relaxed);
+        if call.cursor == 0 && keeps_pointer_shown() {
+            return before;
+        }
         call.original()
     })?;
     Ok(Some(Hook(Hooked::SetCursor(installed))))
+}
+
+/// The display count `ShowCursor` answers with while its calls are kept
+/// from the system (0: shown, as the system starts with a mouse).
+static SHOW_COUNT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Redirects `module`'s `ShowCursor` import: while the module's windows are
+/// kept hidden ([`keeps_pointer_shown`]) the system pointer stays as it is,
+/// the display count the module sees kept here. `None` if the module does
+/// not import it. Once per process.
+pub fn hook_show_cursor(module: u32) -> Result<Option<Hook>, HookError> {
+    let Some(slot) = slot(module, "ShowCursor")? else { return Ok(None) };
+    let installed = show_cursor::install_slot(slot, |call| {
+        if !keeps_pointer_shown() {
+            return call.original();
+        }
+        let by = if call.show != 0 { 1 } else { -1 };
+        SHOW_COUNT.fetch_add(by, Ordering::Relaxed) + by
+    })?;
+    Ok(Some(Hook(Hooked::ShowCursor(installed))))
+}
+
+/// Whether the module's hiding of the system pointer is kept from the
+/// system: while its windows are kept hidden, where the pointer the user
+/// sees is never over them.
+pub fn keeps_pointer_shown() -> bool {
+    crate::hidden::hiding()
 }
 
 /// The cursor handle the watched module set last ([`hook_set_cursor`]),
@@ -218,4 +269,40 @@ impl Confinement {
 
 impl Drop for Confinement {
     fn drop(&mut self) { self.release(); }
+}
+
+/// The user's pointer size at 96 DPI, in pixels: the accessibility
+/// setting `HKCU\Control Panel\Cursors\CursorBaseSize` (a DWORD; Windows
+/// writes it once the size is changed, 32 being the default). `None` when
+/// it is absent or not a positive DWORD.
+pub fn cursor_base_size() -> Option<u32> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
+    let key: Vec<u16> = "Control Panel\\Cursors\0".encode_utf16().collect();
+    let value: Vec<u16> = "CursorBaseSize\0".encode_utf16().collect();
+    let mut data = 0u32;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    // SAFETY: both names are NUL-terminated UTF-16 that outlive the call;
+    // RRF_RT_REG_DWORD restricts the value to 4 bytes, the size of `data`
+    // as told in `size`; a null type pointer is permitted.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut data as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    (status == 0 && data > 0).then_some(data)
+}
+
+/// The system's cursor width metric (`SM_CXCURSOR`) at 96 DPI, in pixels.
+pub fn cursor_metric_size() -> Option<u32> {
+    use windows_sys::Win32::UI::HiDpi::GetSystemMetricsForDpi;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SM_CXCURSOR;
+    // SAFETY: a value query without pointers; 0 means failure.
+    let size = unsafe { GetSystemMetricsForDpi(SM_CXCURSOR, 96) };
+    u32::try_from(size).ok().filter(|&s| s > 0)
 }

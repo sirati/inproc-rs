@@ -22,6 +22,38 @@
 
 use crate::mem::{MemError, Ptr32};
 
+/// A hook's handler, read by every call of the hooked function on the
+/// game's thread without waiting for anyone. Installation and removal swap
+/// it. A replaced handler is leaked, never freed: a call that loaded it
+/// before the swap may still run it (hooks are installed a few times per
+/// process, so the leak is bounded).
+pub struct HandlerSlot<H>(std::sync::atomic::AtomicPtr<H>);
+
+impl<H: Send + Sync + 'static> HandlerSlot<H> {
+    pub const fn new() -> Self {
+        Self(std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()))
+    }
+
+    pub fn set(&self, handler: Option<H>) {
+        let new = handler.map_or(std::ptr::null_mut(), |h| Box::into_raw(Box::new(h)));
+        // The old handler is deliberately leaked (see the type's docs).
+        self.0.swap(new, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    pub fn get(&self) -> Option<&'static H> {
+        let handler = self.0.load(std::sync::atomic::Ordering::Acquire);
+        // SAFETY: a non-null pointer comes from `Box::into_raw` in `set`
+        // and is never freed, so it stays valid for the process's life.
+        unsafe { handler.as_ref() }
+    }
+}
+
+impl<H: Send + Sync + 'static> Default for HandlerSlot<H> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum HookError {
     #[error(transparent)]
@@ -338,8 +370,7 @@ macro_rules! fastcall_hook {
             #[cfg(target_arch = "x86")]
             extern "fastcall" fn trampoline($this: u32, $edx: u32 $(, $arg: u32)*) -> $ret {
                 let call = Call { $this, $edx, $($arg,)* original: ORIGINAL.load(SeqCst) };
-                let guard = HANDLER.read().unwrap_or_else(|e| e.into_inner());
-                let Some(handler) = guard.as_ref() else { return call.original() };
+                let Some(handler) = HANDLER.get() else { return call.original() };
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| handler(&call))) {
                     Ok(r) => r,
                     Err(_) => {
@@ -566,7 +597,7 @@ macro_rules! thiscall_fn {
 macro_rules! __hook_common {
     ($name:ident, $ret:ty) => {
             type Handler = ::std::boxed::Box<dyn Fn(&Call) -> $ret + Send + Sync>;
-        static HANDLER: ::std::sync::RwLock<Option<Handler>> = ::std::sync::RwLock::new(None);
+        static HANDLER: $crate::hook::HandlerSlot<Handler> = $crate::hook::HandlerSlot::new();
         /// The function to call as "original"; stays valid after
         /// uninstalling (slot: the old pointer; inline: the leaked
         /// trampoline), so a call racing an uninstall still works.
@@ -585,10 +616,10 @@ macro_rules! __hook_common {
 
         impl Drop for Installed {
             fn drop(&mut self) {
-                // Restore the code first, then retire the handler (this
-                // waits for calls still inside it).
+                // Restore the code first, then retire the handler (a call
+                // still inside it keeps running it: it is never freed).
                 drop(self.0.take());
-                *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = None;
+                HANDLER.set(None);
                 ACTIVE.store(false, SeqCst);
             }
         }
@@ -607,7 +638,7 @@ macro_rules! __hook_common {
                 claim()?;
                 let result = (|| {
                     ORIGINAL.store(slot.read()?, SeqCst);
-                    *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(handler));
+                    HANDLER.set(Some(Box::new(handler)));
                     $crate::hook::SlotPatch::replace(slot, trampoline as *const () as usize as u32)
                 })();
                 result.map(|p| Installed(Some(Patch::Slot(p)))).inspect_err(|_| ACTIVE.store(false, SeqCst))
@@ -631,13 +662,13 @@ macro_rules! __hook_common {
                     // Handler first: the jump may be taken the moment it
                     // is written. Until ORIGINAL is set, the trampoline
                     // cannot be reached (the jump is not written yet).
-                    *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(handler));
+                    HANDLER.set(Some(Box::new(handler)));
                     $crate::hook::InlinePatch::install(function, prologue, trampoline as *const () as usize as u32, |t| {
                         ORIGINAL.store(t, SeqCst)
                     })
                 })();
                 result.map(|p| Installed(Some(Patch::Inline(p)))).inspect_err(|_| {
-                    *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = None;
+                    HANDLER.set(None);
                     ACTIVE.store(false, SeqCst);
                 })
             }
@@ -670,12 +701,12 @@ macro_rules! __hook_common {
             #[cfg(target_arch = "x86")]
             {
                 claim()?;
-                *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(handler));
+                HANDLER.set(Some(Box::new(handler)));
                 let result = $crate::hook::InlinePatch::install_over_jmp(function, trampoline as *const () as usize as u32, |t| {
                     ORIGINAL.store(t, SeqCst)
                 });
                 result.map(|p| Installed(Some(Patch::Inline(p)))).inspect_err(|_| {
-                    *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = None;
+                    HANDLER.set(None);
                     ACTIVE.store(false, SeqCst);
                 })
             }
@@ -696,12 +727,12 @@ macro_rules! __hook_common {
             #[cfg(target_arch = "x86")]
             {
                 claim()?;
-                *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(handler));
+                HANDLER.set(Some(Box::new(handler)));
                 let result = $crate::hook::CallSitePatch::install(site, expected, trampoline as *const () as usize as u32, |callee| {
                     ORIGINAL.store(callee, SeqCst)
                 });
                 result.map(|p| Installed(Some(Patch::CallSite(p)))).inspect_err(|_| {
-                    *HANDLER.write().unwrap_or_else(|e| e.into_inner()) = None;
+                    HANDLER.set(None);
                     ACTIVE.store(false, SeqCst);
                 })
             }
@@ -757,8 +788,7 @@ macro_rules! stdcall_hook {
             #[cfg(target_arch = "x86")]
             extern "stdcall" fn trampoline($($arg: u32),*) -> $ret {
                 let call = Call { $($arg,)* original: ORIGINAL.load(SeqCst) };
-                let guard = HANDLER.read().unwrap_or_else(|e| e.into_inner());
-                let Some(handler) = guard.as_ref() else { return call.original() };
+                let Some(handler) = HANDLER.get() else { return call.original() };
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| handler(&call))) {
                     Ok(r) => r,
                     Err(_) => {
@@ -819,8 +849,7 @@ macro_rules! cdecl_hook {
             #[cfg(target_arch = "x86")]
             extern "C" fn trampoline($($arg: u32),*) -> $ret {
                 let call = Call { $($arg,)* original: ORIGINAL.load(SeqCst) };
-                let guard = HANDLER.read().unwrap_or_else(|e| e.into_inner());
-                let Some(handler) = guard.as_ref() else { return call.original() };
+                let Some(handler) = HANDLER.get() else { return call.original() };
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| handler(&call))) {
                     Ok(r) => r,
                     Err(_) => {

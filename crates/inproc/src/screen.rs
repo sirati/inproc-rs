@@ -6,7 +6,7 @@
 //!
 //! [`hook_scaled`] redirects a module's import of `GetSystemMetrics`.
 
-use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use crate::hook::HookError;
 
@@ -39,10 +39,7 @@ impl std::fmt::Debug for Hook {
 
 /// The screen's size as reported, once asked for (shared by every module
 /// redirected: they all learn the same size).
-static SIZE: Mutex<Option<(i32, i32)>> = Mutex::new(None);
-
-/// How many modules are redirected (at most two).
-static HOOKED: Mutex<usize> = Mutex::new(0);
+static SIZE: OnceLock<(i32, i32)> = OnceLock::new();
 
 /// The primary display's mode in its own pixels (`EnumDisplaySettingsW`'s
 /// current settings: whatever the caller's DPI awareness, unlike
@@ -105,24 +102,25 @@ pub fn hook_scaled(module: u32, size: ScreenSize) -> Result<Option<Hook>, HookEr
             SM_CYSCREEN => 1,
             _ => return original(),
         };
-        let mut known = SIZE.lock().unwrap_or_else(|e| e.into_inner());
-        let (w, h) = *known.get_or_insert_with(|| {
-            // SAFETY: plain queries of the screen's size.
-            let full = display_mode().unwrap_or_else(|| unsafe { (GetSystemMetrics(SM_CXSCREEN as i32), GetSystemMetrics(SM_CYSCREEN as i32)) });
-            let (w, h) = size(full);
-            (w.max(1), h.max(1))
-        });
+        let (w, h) = match SIZE.get() {
+            Some(&known) => known,
+            None => {
+                // SAFETY: plain queries of the screen's size.
+                let full = display_mode().unwrap_or_else(|| unsafe { (GetSystemMetrics(SM_CXSCREEN as i32), GetSystemMetrics(SM_CYSCREEN as i32)) });
+                let (w, h) = size(full);
+                // (A thread racing this one computed the same; the first stays.)
+                let _ = SIZE.set((w.max(1), h.max(1)));
+                *SIZE.get().unwrap_or(&(w.max(1), h.max(1)))
+            }
+        };
         if axis == 0 { w } else { h }
     };
-    let mut hooked = HOOKED.lock().unwrap_or_else(|e| e.into_inner());
-    let installed = match *hooked {
-        0 => {
-            let scaled = scaled.clone();
-            Installed::First(get_system_metrics::install_slot(slot, move |call| scaled(call.index, &|| call.original()))?)
-        }
-        1 => Installed::Second(get_system_metrics_2::install_slot(slot, move |call| scaled(call.index, &|| call.original()))?),
-        _ => return Err(HookError::AlreadyInstalled),
+    // Each of the two hook modules claims itself once; the first free one
+    // takes this module.
+    let first = scaled.clone();
+    let installed = match get_system_metrics::install_slot(slot, move |call| first(call.index, &|| call.original())) {
+        Err(HookError::AlreadyInstalled) => Installed::Second(get_system_metrics_2::install_slot(slot, move |call| scaled(call.index, &|| call.original()))?),
+        first => Installed::First(first?),
     };
-    *hooked += 1;
     Ok(Some(Hook(installed)))
 }

@@ -4,11 +4,11 @@
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::SystemServices::{MK_LBUTTON, MK_MBUTTON, MK_RBUTTON};
-use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, MAPVK_VK_TO_VSC, MapVirtualKeyW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, EnumWindows, GCL_STYLE, GWL_STYLE, GetClassLongW, GetClientRect, GetSystemMetrics, GetWindowLongW, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SW_HIDE, SW_SHOW, ShowWindowAsync, WM_CHAR,
+    GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SendMessageW, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SW_HIDE, SW_SHOW, ShowWindowAsync, WM_CHAR,
     WM_KEYDOWN, WS_CHILD,
     WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
     WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_PAINT, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP,
@@ -213,7 +213,9 @@ impl Window {
         self.post(WM_MOUSEWHEEL, ((delta as i16 as u16 as usize) << 16) | held.flags(), lparam_xy(p.x, p.y));
     }
 
-    /// A key (Windows virtual-key code) went down or up.
+    /// A key (Windows virtual-key code) went down or up. An intercepted
+    /// window processes the key and its characters in one ordered turn,
+    /// retaining modifiers through character handling on its UI thread.
     pub fn key(self, vk: u32, down: bool) {
         // SAFETY: pure lookup.
         let scan = unsafe { MapVirtualKeyW(vk, MAPVK_VK_TO_VSC) };
@@ -221,14 +223,36 @@ impl Window {
         if !down {
             lparam |= 0xC000_0000u32 as i32 as isize;
         }
-        self.post(if down { WM_KEYDOWN } else { WM_KEYUP }, vk as WPARAM, lparam);
+        if !crate::keyboard::post_key(self, vk, down, lparam) {
+            self.post(if down { WM_KEYDOWN } else { WM_KEYUP }, vk as WPARAM, lparam);
+        }
+    }
+
+    /// Delivers a key immediately on this window's UI thread. Returns false
+    /// on any other thread. Use for an action checked against the current
+    /// modal window so queued input cannot outlive that window.
+    pub fn key_now(self, vk: u32, down: bool) -> bool {
+        // SAFETY: both lookups have no output pointer and inspect this window.
+        if unsafe { GetWindowThreadProcessId(self.hwnd(), std::ptr::null_mut()) != GetCurrentThreadId() } {
+            return false;
+        }
+        // SAFETY: pure virtual-key lookup.
+        let scan = unsafe { MapVirtualKeyW(vk, MAPVK_VK_TO_VSC) };
+        let mut lparam = 1 | (scan as isize & 0xFF) << 16;
+        if !down { lparam |= 0xC000_0000u32 as i32 as isize; }
+        // SAFETY: the recipient belongs to this thread. Key messages contain
+        // integer values only and complete before this call returns.
+        unsafe { SendMessageW(self.hwnd(), if down { WM_KEYDOWN } else { WM_KEYUP }, vk as WPARAM, lparam); }
+        true
     }
 
     /// A typed character.
     pub fn char(self, c: char) {
         let mut units = [0u16; 2];
         for &u in c.encode_utf16(&mut units).iter() {
-            self.post(WM_CHAR, u as WPARAM, 1);
+            if !crate::keyboard::post_char(self, u) {
+                self.post(WM_CHAR, u as WPARAM, 1);
+            }
         }
     }
 }

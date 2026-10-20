@@ -57,6 +57,61 @@ pub fn prepare_before_claim(base: u32, claimed: &std::sync::atomic::AtomicU32, p
     claimed.swap(base, std::sync::atomic::Ordering::SeqCst) == 0
 }
 
+/// A process-wide installation that two library loads may attempt at once
+/// (a `prepare` for [`prepare_before_claim`]). Only one runs it; another
+/// caller arriving meanwhile yields until it is done, so that both return
+/// with it in place. That wait exists only while two threads load the same
+/// library at startup; afterwards every call returns at once. A failed (or
+/// "not applicable") attempt may be retried by a later caller.
+pub struct InstallOnce(std::sync::atomic::AtomicU8);
+
+impl InstallOnce {
+    const IDLE: u8 = 0;
+    const BUSY: u8 = 1;
+    const DONE: u8 = 2;
+
+    pub const fn new() -> Self {
+        Self(std::sync::atomic::AtomicU8::new(Self::IDLE))
+    }
+
+    pub fn done(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire) == Self::DONE
+    }
+
+    /// Runs `install` unless it already succeeded (`Ok(true)`).
+    pub fn run<E>(&self, install: impl FnOnce() -> Result<bool, E>) -> Result<bool, E> {
+        use std::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+        struct Reset<'a>(&'a std::sync::atomic::AtomicU8);
+        impl Drop for Reset<'_> {
+            // (Also when `install` unwinds: a waiter must not spin forever.)
+            fn drop(&mut self) {
+                let _ = self.0.compare_exchange(InstallOnce::BUSY, InstallOnce::IDLE, AcqRel, Acquire);
+            }
+        }
+        loop {
+            match self.0.compare_exchange(Self::IDLE, Self::BUSY, AcqRel, Acquire) {
+                Ok(_) => {
+                    let reset = Reset(&self.0);
+                    let result = install();
+                    if matches!(result, Ok(true)) {
+                        self.0.store(Self::DONE, Release);
+                    }
+                    drop(reset);
+                    return result;
+                }
+                Err(Self::DONE) => return Ok(true),
+                Err(_) => std::thread::yield_now(),
+            }
+        }
+    }
+}
+
+impl Default for InstallOnce {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Complete import redirection on the caller's loading thread, after the
 /// module is mapped but before control returns to its first caller.
 fn load_then_notify(load: impl FnOnce() -> u32, path: impl FnOnce() -> Option<String>, loaded: impl FnOnce(&str, u32)) -> u32 {
@@ -99,7 +154,7 @@ mod tests {
     }
 
     fn concurrent_preparation(second_already_loaded: bool) {
-        use std::sync::{Arc, Mutex, mpsc};
+        use std::sync::{Arc, mpsc};
         use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
         use std::thread;
         use std::time::Duration;
@@ -109,7 +164,7 @@ mod tests {
 
         let claimed = Arc::new(AtomicU32::new(0));
         let installed = Arc::new(AtomicBool::new(false));
-        let text_install = Arc::new(Mutex::new(()));
+        let text_install = Arc::new(super::InstallOnce::new());
         let (first_preparing, first_entered) = mpsc::channel();
         let (release_first, released) = mpsc::channel();
         let (second_progress, progress) = mpsc::channel();
@@ -120,10 +175,12 @@ mod tests {
                 let mut owns_setup = false;
                 assert_eq!(load_then_notify(|| 0x1000, || Some("JGL.DLL".into()), |_, base| {
                     owns_setup = prepare_before_claim(base, &claimed, || {
-                        let _guard = text_install.lock().unwrap();
-                        first_preparing.send(()).unwrap();
-                        released.recv_timeout(timeout).unwrap();
-                        installed.store(true, Ordering::Release);
+                        text_install.run(|| {
+                            first_preparing.send(()).unwrap();
+                            released.recv_timeout(timeout).unwrap();
+                            installed.store(true, Ordering::Release);
+                            Ok::<_, ()>(true)
+                        }).unwrap();
                     });
                 }), 0x1000);
                 (owns_setup, installed.load(Ordering::Acquire))
@@ -139,7 +196,7 @@ mod tests {
                 let mut loaded = |_: &str, base| {
                     owns_setup = prepare_before_claim(base, &claimed, || {
                         second_progress.send(Progress::Preparing).unwrap();
-                        let _guard = text_install.lock().unwrap();
+                        text_install.run(|| -> Result<bool, ()> { panic!("installed twice") }).unwrap();
                         assert!(installed.load(Ordering::Acquire));
                     });
                 };

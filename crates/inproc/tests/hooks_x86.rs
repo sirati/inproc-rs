@@ -31,16 +31,19 @@ fn call_target(this: u32, a: u32) -> u32 {
     unsafe { inproc_test_target(this, 0, a) }
 }
 
-// One hook module is shared by the tests, which cargo runs in parallel.
-static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// One hook module is shared by the cases, so one test runs them in turn
+// (cargo runs tests in parallel).
+#[test]
+fn hook_cases_in_turn() {
+    inline_hook_intercepts_calls_original_and_restores();
+    inline_hook_refuses_unexpected_code();
+}
 
 inproc::fastcall_hook! {
     mod target_hook(this, edx; a) -> u32;
 }
 
-#[test]
 fn inline_hook_intercepts_calls_original_and_restores() {
-    let _serial = SERIAL.lock().unwrap();
     assert_eq!(call_target(10, 3), 16);
     let seen = std::sync::Arc::new(AtomicU32::new(0));
     let s = seen.clone();
@@ -57,9 +60,7 @@ fn inline_hook_intercepts_calls_original_and_restores() {
     assert_eq!(call_target(10, 3), 16);
 }
 
-#[test]
 fn inline_hook_refuses_unexpected_code() {
-    let _serial = SERIAL.lock().unwrap();
     let addr = inproc_test_target as usize as u32;
     let err = target_hook::install_inline(addr, &[0x90, 0x90, 0x90, 0x90, 0x90], |c| c.original());
     assert!(matches!(err, Err(inproc::hook::HookError::UnexpectedCode { .. })));

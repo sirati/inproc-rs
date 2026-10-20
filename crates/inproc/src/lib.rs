@@ -13,6 +13,8 @@
 //! * [`hook`]: replace a function pointer in a vtable (or any pointer-sized
 //!   slot) and restore it when the guard is dropped.
 //! * `window`: find the process's main window and post input messages to it.
+//! * `keyboard`: synchronize forwarded modifiers on an intercepted window's
+//!   own UI thread.
 //! * `pointer`: what a module of the program learns of the pointer and the
 //!   keyboard focus (`GetCursorPos`, `GetFocus`), overridable.
 //! * `screen`: what it learns of the screen's size (`GetSystemMetrics`),
@@ -21,6 +23,7 @@
 //! * `hidden`: its top-level windows kept hidden from the start.
 //! * `loader`: the libraries it loads, as it loads them.
 //! * `wine`: whether it runs under Wine, Unix paths as its Windows ones.
+//! * `alloc`: a global allocator on a private heap, off the program's own.
 //! * `dpi`: our own thread's DPI awareness, not the program's.
 //! * [`entry!`]: the DLL entry point, which runs the client's initialisation
 //!   on a fresh thread, outside the loader lock, with panics caught.
@@ -28,10 +31,14 @@
 //! Everything `unsafe` in the project's Windows interop lives in this crate.
 #![cfg_attr(not(windows), allow(dead_code, unused))]
 
+#[cfg(windows)]
+pub mod alloc;
 pub mod hook;
 pub mod logging;
 #[cfg(windows)]
 pub mod message;
+#[cfg(windows)]
+pub mod keyboard;
 pub mod mem;
 #[cfg(windows)]
 pub mod dpi;
