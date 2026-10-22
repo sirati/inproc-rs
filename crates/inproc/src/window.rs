@@ -2,7 +2,7 @@
 //! posting input messages to it as if the user had typed or clicked there.
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
+use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
 use windows_sys::Win32::System::SystemServices::{MK_LBUTTON, MK_MBUTTON, MK_RBUTTON};
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, MAPVK_VK_TO_VSC, MapVirtualKeyW};
@@ -109,6 +109,13 @@ impl Window {
         let mut p = POINT { x, y };
         // SAFETY: writes only `p`; fails cleanly for a stale handle.
         (unsafe { ClientToScreen(self.hwnd(), &mut p) } != 0).then_some((p.x, p.y))
+    }
+
+    /// Screen position (x, y) in client coordinates.
+    pub fn screen_to_client(self, x: i32, y: i32) -> Option<(i32, i32)> {
+        let mut p = POINT { x, y };
+        // SAFETY: writes only `p`; fails cleanly for a stale handle.
+        (unsafe { ScreenToClient(self.hwnd(), &mut p) } != 0).then_some((p.x, p.y))
     }
 
     /// Whether the window is shown (`IsWindowVisible`).

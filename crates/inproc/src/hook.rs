@@ -589,6 +589,56 @@ macro_rules! thiscall_fn {
     };
 }
 
+/// Declares a `__cdecl` function of a foreign 32-bit x86 program (the
+/// caller pops its arguments), as [`thiscall_fn!`](crate::thiscall_fn)
+/// does for methods: `Function::at(address, prologue)` and
+/// `Function::call(args...)`. The same caveats hold.
+#[macro_export]
+macro_rules! cdecl_fn {
+    ($(#[$m:meta])* $vis:vis fn $name:ident($($arg:ident),*) -> $ret:ty;) => {
+        $(#[$m])*
+        $vis mod $name {
+            #![allow(unsafe_code, dead_code)]
+
+            /// The function, its start checked.
+            #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+            pub struct Function(u32);
+
+            impl Function {
+                /// The function at `address`, which must start with
+                /// `prologue` (or another mod's `jmp rel32`).
+                pub fn at(address: u32, prologue: &[u8]) -> Result<Function, $crate::hook::HookError> {
+                    #[cfg(target_arch = "x86")]
+                    {
+                        $crate::hook::check_function_start(address, prologue)?;
+                        Ok(Function(address))
+                    }
+                    #[cfg(not(target_arch = "x86"))]
+                    { let _ = (address, prologue); Err($crate::hook::HookError::Unsupported) }
+                }
+
+                pub fn address(self) -> u32 {
+                    self.0
+                }
+
+                /// Calls it.
+                pub fn call(self $(, $arg: u32)*) -> $ret {
+                    #[cfg(target_arch = "x86")]
+                    {
+                        type Raw = extern "C" fn($($crate::__ident_u32!($arg)),*) -> $ret;
+                        // SAFETY: `at` checked the function's start; the
+                        // signature is this macro invocation's contract.
+                        let f: Raw = unsafe { ::core::mem::transmute::<usize, Raw>(self.0 as usize) };
+                        f($($arg),*)
+                    }
+                    #[cfg(not(target_arch = "x86"))]
+                    { let _ = ($($arg,)*); unreachable!("no foreign functions outside 32-bit x86 processes") }
+                }
+            }
+        }
+    };
+}
+
 /// The parts of a hook module shared by all calling conventions: the
 /// handler and original-function slots, `Installed`, `install_slot` and
 /// `install_inline`. Expects `Call` and `trampoline` in the module.
