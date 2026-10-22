@@ -40,8 +40,9 @@ impl log::Log for FileLogger {
         let _ = self.lines.send(Line::Text(line));
     }
 
-    /// Waits (at most 200 ms) for the writer: only the panic hook calls
-    /// it, so that the panic's line reaches the file before the process ends.
+    /// Waits (at most 200 ms) for the writer. Only the panic hook and a
+    /// deliberate process end call it, so that their last lines reach the
+    /// file before the process ends.
     fn flush(&self) {
         let (done, written) = std::sync::mpsc::channel();
         if self.lines.send(Line::Flush(done)).is_ok() {
