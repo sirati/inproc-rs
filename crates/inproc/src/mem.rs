@@ -231,6 +231,25 @@ mod tests {
         assert!(matches!(Ptr32::<u32>::new(16).read(), Err(MemError::Unreadable { .. })));
     }
 
+    /// What one guarded read costs (`--ignored --nocapture`, under Wine).
+    #[test]
+    #[ignore]
+    fn read_cost() {
+        let data: [u32; 3] = [7, 8, 9];
+        let p = Ptr32::<u32>::new(data.as_ptr() as u32);
+        let n = 200_000;
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(p.read().unwrap());
+        }
+        let e = t.elapsed();
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            std::hint::black_box(std::time::Instant::now());
+        }
+        eprintln!("{n} reads: {e:?} ({:?} each); Instant::now {:?} each", e / n, t.elapsed() / n);
+    }
+
     #[test]
     fn writes_own_memory_and_rejects_garbage() {
         let mut data: [i32; 2] = [0, 0];
