@@ -46,6 +46,21 @@ pub fn memory() -> Option<Memory> {
     })
 }
 
+/// CPU time the calling thread has used so far (user and kernel, ns;
+/// 100 ns resolution), or `None`. Against wall time, it tells a thread that
+/// works from one that waits.
+pub fn thread_cpu_ns() -> Option<u64> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+    let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: the pseudo handle names this thread; the call writes the four
+    // local structs only.
+    let ok = unsafe { GetThreadTimes(GetCurrentThread(), &mut created, &mut exited, &mut kernel, &mut user) } != 0;
+    let ns = |t: FILETIME| ((u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)) * 100;
+    ok.then(|| ns(kernel) + ns(user))
+}
+
 #[cfg(test)]
 mod tests {
     /// The child runs this test again with the variable set: a second thread

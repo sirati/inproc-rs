@@ -115,11 +115,24 @@ impl<T: Pod> Ptr32<T> {
     }
 }
 
+/// How many guarded reads and writes of foreign memory the current thread
+/// made ([`read_bytes`], [`write_bytes`]). Each is a system call (Wine's
+/// `NtReadVirtualMemory`): cheap natively, costly where the program runs
+/// emulated (FEX on Apple silicon). For per-frame accounting.
+pub fn thread_accesses() -> (u64, u64) {
+    ACCESSES.with(|a| (a[0].get(), a[1].get()))
+}
+
+thread_local! {
+    static ACCESSES: [std::cell::Cell<u64>; 2] = const { [std::cell::Cell::new(0), std::cell::Cell::new(0)] };
+}
+
 /// Copies `out.len()` bytes from address `addr` of this process.
 pub fn read_bytes(addr: u64, out: &mut [u8]) -> Result<(), MemError> {
     if out.is_empty() {
         return Ok(());
     }
+    ACCESSES.with(|a| a[0].set(a[0].get() + 1));
     if addr == 0 {
         return Err(MemError::Null);
     }
@@ -133,6 +146,7 @@ pub fn write_bytes(addr: u64, bytes: &[u8]) -> Result<(), MemError> {
     if bytes.is_empty() {
         return Ok(());
     }
+    ACCESSES.with(|a| a[1].set(a[1].get() + 1));
     if addr == 0 {
         return Err(MemError::Null);
     }

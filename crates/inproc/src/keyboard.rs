@@ -211,6 +211,17 @@ pub(crate) fn observe(message: Message) -> bool {
     explicit_release
 }
 
+/// What the game's unit slide (`civ3_sys::unit_slide::slide_ms`) asks of the
+/// keyboard: whether Shift is down now (`GetAsyncKeyState(VK_SHIFT)`, high
+/// byte nonzero) and whether Caps Lock is on (`GetKeyState(VK_CAPITAL)`, low
+/// bit), in the same calls.
+pub fn shift_and_caps_lock() -> (bool, bool) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState};
+    // SAFETY: plain queries of key state.
+    let (caps, shift) = unsafe { (GetKeyState(0x14), GetAsyncKeyState(0x10)) };
+    ((shift as u16) >> 8 != 0, caps & 1 != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
