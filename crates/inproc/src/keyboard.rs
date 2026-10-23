@@ -373,13 +373,15 @@ mod tests {
         let window = test.window();
         assert!(window.key_now(0x1B, true));
         assert!(window.key_now(0x1B, false));
+        // (With its character: Civ3's context menu and tile box close on
+        // the Escape character, never on the key alone.)
         assert_eq!(seen().iter().map(|s| (s.id, s.vk)).collect::<Vec<_>>(),
-            vec![(WM_KEYDOWN, 0x1B), (WM_KEYUP, 0x1B)],
+            vec![(WM_KEYDOWN, 0x1B), (WM_CHAR, 0x1B), (WM_KEYUP, 0x1B)],
             "Escape must reach the native handler before another dismissal is processed");
         let rejected = std::thread::spawn(move || !window.key_now(0x1B, true)).join().unwrap();
         assert!(rejected, "a foreign thread must not block sending a synchronous key");
         pump();
-        assert_eq!(seen().len(), 2, "neither immediate delivery nor rejected delivery queues another Escape");
+        assert_eq!(seen().len(), 3, "neither immediate delivery nor rejected delivery queues another Escape");
     }
 
     #[test]

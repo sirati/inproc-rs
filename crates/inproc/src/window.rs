@@ -5,7 +5,7 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient};
 use windows_sys::Win32::System::SystemServices::{MK_LBUTTON, MK_MBUTTON, MK_RBUTTON};
 use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, MAPVK_VK_TO_VSC, MapVirtualKeyW};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetDoubleClickTime, MAPVK_VK_TO_CHAR, MAPVK_VK_TO_VSC, MapVirtualKeyW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, EnumWindows, GCL_STYLE, GWL_STYLE, GetClassLongW, GetClientRect, GetSystemMetrics, GetWindowLongW, GetWindowTextW,
     GetWindowThreadProcessId, IsWindowVisible, PostMessageW, SendMessageW, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SW_HIDE, SW_SHOW, ShowWindowAsync, WM_CHAR,
@@ -235,9 +235,20 @@ impl Window {
         }
     }
 
-    /// Delivers a key immediately on this window's UI thread. Returns false
-    /// on any other thread. Use for an action checked against the current
-    /// modal window so queued input cannot outlive that window.
+    /// Delivers a key immediately on this window's UI thread, as typed: a
+    /// press with a character comes with that character (the `WM_CHAR`
+    /// `TranslateMessage` would add). Returns false on any other thread.
+    /// Use for an action checked against the current modal window so
+    /// queued input cannot outlive that window.
+    ///
+    /// The character is the key's own (`MapVirtualKeyW`, `MAPVK_VK_TO_CHAR`)
+    /// whatever modifiers are held, so this is for keys no modifier
+    /// changes: Escape, Enter, Tab, Backspace. Civ3 acts on such a key only
+    /// through its character. Its key-down handler (0x605EF0) passes a key
+    /// to the form's key handler (vtable +0x8C) only when this mapping
+    /// gives no character, and leaves the rest to `WM_CHAR` (0x608890 ->
+    /// 0x605E00). Escape without its character closes no context menu
+    /// (0x61AA80) and no tile box (0x5AAFD0).
     pub fn key_now(self, vk: u32, down: bool) -> bool {
         // SAFETY: both lookups have no output pointer and inspect this window.
         if unsafe { GetWindowThreadProcessId(self.hwnd(), std::ptr::null_mut()) != GetCurrentThreadId() } {
@@ -250,6 +261,15 @@ impl Window {
         // SAFETY: the recipient belongs to this thread. Key messages contain
         // integer values only and complete before this call returns.
         unsafe { SendMessageW(self.hwnd(), if down { WM_KEYDOWN } else { WM_KEYUP }, vk as WPARAM, lparam); }
+        if down {
+            // SAFETY: pure virtual-key lookup. (Bit 31 marks a dead key,
+            // which makes no character of its own.)
+            let character = unsafe { MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR) };
+            if character & 0x8000_0000 == 0 && character & 0xFFFF != 0 {
+                // SAFETY: as above, an integer message to this thread's window.
+                unsafe { SendMessageW(self.hwnd(), WM_CHAR, (character & 0xFFFF) as WPARAM, lparam); }
+            }
+        }
         true
     }
 
