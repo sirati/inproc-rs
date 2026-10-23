@@ -360,6 +360,7 @@ macro_rules! fastcall_hook {
                         // trampoline), whose signature is this macro
                         // invocation's documented contract.
                         let f: Raw = unsafe { ::core::mem::transmute::<usize, Raw>(self.original as usize) };
+                        let _original = $crate::hook_time::Original::enter();
                         f($this, self.$edx $(, $arg)*)
                     }
                     #[cfg(not(target_arch = "x86"))]
@@ -370,6 +371,7 @@ macro_rules! fastcall_hook {
             #[cfg(target_arch = "x86")]
             extern "fastcall" fn trampoline($this: u32, $edx: u32 $(, $arg: u32)*) -> $ret {
                 let call = Call { $this, $edx, $($arg,)* original: ORIGINAL.load(SeqCst) };
+                let _timed = $crate::hook_time::Hook::enter(&STAT);
                 let Some(handler) = HANDLER.get() else { return call.original() };
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| handler(&call))) {
                     Ok(r) => r,
@@ -457,6 +459,7 @@ macro_rules! call_site_hook {
                         // `call rel32`, whose signature this macro
                         // invocation declares.
                         let f: Raw = unsafe { ::core::mem::transmute::<usize, Raw>(self.original as usize) };
+                        let _original = $crate::hook_time::Original::enter();
                         f()
                     }
                     #[cfg(not(target_arch = "x86"))]
@@ -467,11 +470,13 @@ macro_rules! call_site_hook {
             /// The handler, a `fn(&Call) -> $ret` as an address (0: none).
             static HANDLER: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
             static ORIGINAL: ::std::sync::atomic::AtomicU32 = ::std::sync::atomic::AtomicU32::new(0);
+            static STAT: $crate::hook_time::Stat = $crate::hook_time::Stat::new(stringify!($name));
             static ACTIVE: ::std::sync::atomic::AtomicBool = ::std::sync::atomic::AtomicBool::new(false);
 
             #[cfg(target_arch = "x86")]
             extern "C" fn detour() -> $ret {
                 let call = Call { original: ORIGINAL.load(SeqCst) };
+                let _timed = $crate::hook_time::Hook::enter(&STAT);
                 let handler = HANDLER.load(SeqCst);
                 if handler == 0 {
                     return call.original();
@@ -648,6 +653,8 @@ macro_rules! __hook_common {
     ($name:ident, $ret:ty) => {
             type Handler = ::std::boxed::Box<dyn Fn(&Call) -> $ret + Send + Sync>;
         static HANDLER: $crate::hook::HandlerSlot<Handler> = $crate::hook::HandlerSlot::new();
+        /// This hook's time on the watched thread (`crate::hook_time`).
+        static STAT: $crate::hook_time::Stat = $crate::hook_time::Stat::new(stringify!($name));
         /// The function to call as "original"; stays valid after
         /// uninstalling (slot: the old pointer; inline: the leaked
         /// trampoline), so a call racing an uninstall still works.
@@ -828,6 +835,7 @@ macro_rules! stdcall_hook {
                         // SAFETY: `original` is the hooked function, whose
                         // signature is this macro invocation's contract.
                         let f: Raw = unsafe { ::core::mem::transmute::<usize, Raw>(self.original as usize) };
+                        let _original = $crate::hook_time::Original::enter();
                         f($($arg),*)
                     }
                     #[cfg(not(target_arch = "x86"))]
@@ -838,6 +846,7 @@ macro_rules! stdcall_hook {
             #[cfg(target_arch = "x86")]
             extern "stdcall" fn trampoline($($arg: u32),*) -> $ret {
                 let call = Call { $($arg,)* original: ORIGINAL.load(SeqCst) };
+                let _timed = $crate::hook_time::Hook::enter(&STAT);
                 let Some(handler) = HANDLER.get() else { return call.original() };
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| handler(&call))) {
                     Ok(r) => r,
@@ -889,6 +898,7 @@ macro_rules! cdecl_hook {
                         // SAFETY: `original` is the hooked function, whose
                         // signature is this macro invocation's contract.
                         let f: Raw = unsafe { ::core::mem::transmute::<usize, Raw>(self.original as usize) };
+                        let _original = $crate::hook_time::Original::enter();
                         f($($arg),*)
                     }
                     #[cfg(not(target_arch = "x86"))]
@@ -899,6 +909,7 @@ macro_rules! cdecl_hook {
             #[cfg(target_arch = "x86")]
             extern "C" fn trampoline($($arg: u32),*) -> $ret {
                 let call = Call { $($arg,)* original: ORIGINAL.load(SeqCst) };
+                let _timed = $crate::hook_time::Hook::enter(&STAT);
                 let Some(handler) = HANDLER.get() else { return call.original() };
                 match ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| handler(&call))) {
                     Ok(r) => r,

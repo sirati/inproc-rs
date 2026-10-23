@@ -34,6 +34,7 @@
 #[cfg(windows)]
 pub mod alloc;
 pub mod hook;
+pub mod hook_time;
 pub mod logging;
 #[cfg(windows)]
 pub mod message;
