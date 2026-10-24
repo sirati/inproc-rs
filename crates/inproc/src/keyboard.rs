@@ -211,14 +211,70 @@ pub(crate) fn observe(message: Message) -> bool {
     explicit_release
 }
 
+/// The modifier sides ([`SIDES`] bits) forwarded keys hold now on the
+/// calling UI thread, as it dispatched them.
+fn forwarded() -> u32 {
+    HELD.with(|held| held.try_borrow().map_or(0, |held| held.values().fold(0, |all, &mask| all | u32::from(mask))))
+}
+
+/// Whether forwarded keys (sides `held`) hold modifier `vk` (either side,
+/// or one side): what `GetAsyncKeyState` must add to the system's answer.
+/// The keys come from another window (the viewer's, which may not be the
+/// system's at all), so the system's asynchronous state never sees them;
+/// only the thread state ([`observe`]) does.
+fn forwarded_down(held: u32, vk: u32) -> bool {
+    let mask = match vk {
+        0x10..=0x12 => 3 << (2 * (vk - 0x10)),
+        0xA0..=0xA5 => 1 << (vk - 0xA0),
+        _ => 0,
+    };
+    held & mask != 0
+}
+
+crate::stdcall_hook! {
+    /// `SHORT GetAsyncKeyState(int)`.
+    mod get_async_key_state(vk) -> i32;
+}
+
+/// A redirected `GetAsyncKeyState` import; restored when dropped.
+pub struct AsyncKeyHook(#[allow(dead_code)] get_async_key_state::Installed);
+
+impl std::fmt::Debug for AsyncKeyHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("AsyncKeyHook") }
+}
+
+/// `GetAsyncKeyState(vk)` as a program driven by forwarded keys should see
+/// it: the system's answer, with the "down" bit (0x8000) also set for a
+/// modifier a forwarded key holds. Civ3 reads Shift this way (Shift+click
+/// in the city screen's production list queues the item, Shift speeds up
+/// the unit slide), and C3X reads Ctrl and Shift.
+pub fn async_key_state(vk: u32) -> i16 {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    // SAFETY: plain query of key state.
+    combined(unsafe { GetAsyncKeyState(vk as i32) }, vk)
+}
+
+fn combined(system: i16, vk: u32) -> i16 {
+    if forwarded_down(forwarded(), vk) { system | i16::MIN } else { system }
+}
+
+/// Redirects `module`'s `GetAsyncKeyState` import to [`async_key_state`]'s
+/// answer. C3X calls through the game's import slot too. `None` if the
+/// module does not import it. Once per process.
+pub fn hook_async_key_state(module: u32) -> Result<Option<AsyncKeyHook>, crate::hook::HookError> {
+    let Some(slot) = crate::pe::import_slot(module, "USER32.dll", "GetAsyncKeyState")? else { return Ok(None) };
+    let installed = get_async_key_state::install_slot(slot, |call| i32::from(combined(call.original() as i16, call.vk)))?;
+    Ok(Some(AsyncKeyHook(installed)))
+}
+
 /// What the game's unit slide (`civ3_sys::unit_slide::slide_ms`) asks of the
 /// keyboard: whether Shift is down now (`GetAsyncKeyState(VK_SHIFT)`, high
 /// byte nonzero) and whether Caps Lock is on (`GetKeyState(VK_CAPITAL)`, low
 /// bit), in the same calls.
 pub fn shift_and_caps_lock() -> (bool, bool) {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, GetKeyState};
-    // SAFETY: plain queries of key state.
-    let (caps, shift) = unsafe { (GetKeyState(0x14), GetAsyncKeyState(0x10)) };
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
+    // SAFETY: plain query of key state.
+    let (caps, shift) = (unsafe { GetKeyState(0x14) }, async_key_state(0x10));
     ((shift as u16) >> 8 != 0, caps & 1 != 0)
 }
 
@@ -232,7 +288,7 @@ mod tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, HWND_MESSAGE, MSG,
         PM_REMOVE, PeekMessageW, RegisterClassW, SendMessageW, TranslateMessage, UnregisterClassW,
-        WM_CHAR, WNDCLASSW,
+        WM_CHAR, WM_LBUTTONDOWN, WNDCLASSW,
     };
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,6 +331,14 @@ mod tests {
                     held: modifiers(),
                 })
             });
+            return 0;
+        }
+        if id == WM_LBUTTONDOWN {
+            // What the game's click handlers ask (City_Form's production
+            // list: GetAsyncKeyState(VK_SHIFT) queues the clicked item).
+            let held = [0x10, 0x11, 0xA0, 0xA1].into_iter().enumerate()
+                .filter(|&(_, vk)| async_key_state(vk) < 0).fold(0, |held, (i, _)| held | 1 << i);
+            SEEN.with(|seen| seen.borrow_mut().push(Seen { id, vk: wparam, held }));
             return 0;
         }
         unsafe { DefWindowProcW(window, id, wparam, lparam) }
@@ -436,6 +500,39 @@ mod tests {
         );
         assert!(chars.contains(&1), "Ctrl+A translation: {chars:?}");
         assert_eq!(modifiers() & 3, 0);
+    }
+
+    #[test]
+    fn forwarded_modifiers_reach_get_async_key_state_in_message_order() {
+        // Civ3 queues a build on a production-list click with Shift held
+        // only if GetAsyncKeyState(VK_SHIFT) says so; keys forwarded from
+        // the viewer's window never reach the system's asynchronous state.
+        let test = TestWindow::new();
+        let click = || unsafe { assert_ne!(PostMessageW(test.handle, WM_LBUTTONDOWN, 1, 0), 0) };
+        click();
+        test.window().key(0x10, true);
+        click();
+        test.window().key(0x10, false);
+        click();
+        test.window().key(0x11, true);
+        click();
+        test.window().key(0x11, false);
+        pump();
+        let clicks: Vec<_> = seen().into_iter().filter(|e| e.id == WM_LBUTTONDOWN).map(|e| e.held).collect();
+        assert_eq!(clicks.len(), 4);
+        assert_eq!(clicks[0] & 1, 0, "no Shift before its press");
+        assert_eq!(clicks[1] & 0b101, 0b101, "Shift (and its left side) held at the click after its press");
+        assert_eq!(clicks[2], 0, "nothing held after the release");
+        assert_eq!(clicks[3] & 0b1011, 0b10, "Ctrl alone");
+        assert!(!forwarded_down(forwarded(), 0x10), "all released");
+    }
+
+    #[test]
+    fn forwarded_sides_map_to_virtual_keys() {
+        assert!(forwarded_down(0b1, 0x10) && forwarded_down(0b10, 0x10) && forwarded_down(0b10, 0xA1));
+        assert!(!forwarded_down(0b10, 0xA0) && !forwarded_down(0b1, 0x11) && !forwarded_down(0b111111, 0x41));
+        assert!(forwarded_down(0b1000, 0x11) && forwarded_down(0b10_0000, 0x12) && forwarded_down(0b1_0000, 0xA4));
+        assert_eq!(combined(0x0001, 0x41), 0x0001, "other keys pass the system's answer");
     }
 
     #[test]
