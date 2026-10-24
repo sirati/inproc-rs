@@ -43,3 +43,27 @@ pub fn dos_path(unix: &Path) -> Option<PathBuf> {
     };
     Some(PathBuf::from(path))
 }
+
+/// `void CDECL wine_get_host_version(const char **sysname, const char **release)`
+/// (ntdll under Wine; the strings are Wine's own, never freed).
+type HostVersion = unsafe extern "C" fn(*mut *const std::ffi::c_char, *mut *const std::ffi::c_char);
+
+/// The Unix system Wine runs on (`uname`'s sysname: `Linux`, `Darwin`);
+/// `None` outside Wine.
+pub fn host_system() -> Option<String> {
+    // SAFETY: both names are NUL-terminated; ntdll is always loaded.
+    let f = unsafe { GetProcAddress(GetModuleHandleA(c"ntdll.dll".as_ptr() as *const u8), c"wine_get_host_version".as_ptr() as *const u8) }?;
+    // SAFETY: Wine's ntdll exports it with this signature (cdecl).
+    let f = unsafe { std::mem::transmute::<unsafe extern "system" fn() -> isize, HostVersion>(f) };
+    let (mut sysname, mut release) = (std::ptr::null(), std::ptr::null());
+    // SAFETY: two writable pointers; Wine fills them with static strings.
+    unsafe { f(&mut sysname, &mut release) };
+    // SAFETY: NULL or a NUL-terminated string that lives as long as Wine.
+    (!sysname.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(sysname) }.to_string_lossy().into_owned())
+}
+
+/// Whether this process runs under Wine on macOS.
+pub fn on_macos() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| host_system().as_deref() == Some("Darwin"))
+}
