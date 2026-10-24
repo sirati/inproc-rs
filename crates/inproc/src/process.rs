@@ -94,3 +94,9 @@ mod tests {
         assert_eq!(status.code(), Some(7));
     }
 }
+
+/// The calling thread's id (`GetCurrentThreadId`).
+pub fn thread_id() -> u32 {
+    // SAFETY: no arguments, no failure.
+    unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() }
+}

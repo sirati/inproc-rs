@@ -93,6 +93,19 @@ impl SlotPatch {
     }
 }
 
+/// Allocates `len` bytes of executable, writable memory for generated code
+/// (never freed: code that may still run must stay). The caller writes it
+/// with [`write_code`] before pointing anything at it.
+pub fn alloc_code(len: usize) -> Result<u32, HookError> {
+    imp::alloc_exec(len)
+}
+
+/// Writes generated code (or a patch) at `addr`, making the pages
+/// writable meanwhile and flushing the instruction cache.
+pub fn write_code(addr: u32, bytes: &[u8]) -> Result<(), HookError> {
+    imp::write(addr, bytes)
+}
+
 impl Drop for SlotPatch {
     fn drop(&mut self) {
         if let Err(e) = imp::write(self.slot.raw(), &self.original.to_le_bytes()) {
