@@ -18,9 +18,10 @@
 //! there is that window's (Wine's macOS driver hides the pointer for the
 //! whole application, a viewer in the same process included).
 //!
-//! For our own windows: [`Confinement`] clips the system pointer to a
-//! rectangle; [`cursor_base_size`] and [`cursor_metric_size`] tell the
-//! user's pointer size.
+//! For our own windows: [`clip_cursor`] clips the system pointer to a
+//! rectangle and [`clip_rect`] tells the clip in effect;
+//! [`cursor_base_size`] and [`cursor_metric_size`] tell the user's
+//! pointer size.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -46,6 +47,11 @@ crate::stdcall_hook! {
 crate::stdcall_hook! {
     /// `int ShowCursor(BOOL)`.
     mod show_cursor(show) -> i32;
+}
+
+crate::stdcall_hook! {
+    /// `BOOL ClipCursor(const RECT *)`.
+    mod clip_cursor(rect) -> i32;
 }
 
 /// The pointer at client position (`x`, `y`) of `window`, which has the
@@ -90,6 +96,7 @@ enum Hooked {
     Focus(#[allow(dead_code)] get_focus::Installed),
     SetCursor(#[allow(dead_code)] set_cursor::Installed),
     ShowCursor(#[allow(dead_code)] show_cursor::Installed),
+    ClipCursor(#[allow(dead_code)] clip_cursor::Installed),
 }
 
 impl std::fmt::Debug for Hook {
@@ -99,6 +106,7 @@ impl std::fmt::Debug for Hook {
             Hooked::Focus(_) => "Hook(GetFocus)",
             Hooked::SetCursor(_) => "Hook(SetCursor)",
             Hooked::ShowCursor(_) => "Hook(ShowCursor)",
+            Hooked::ClipCursor(_) => "Hook(ClipCursor)",
         })
     }
 }
@@ -181,6 +189,21 @@ pub fn hook_show_cursor(module: u32) -> Result<Option<Hook>, HookError> {
     Ok(Some(Hook(Hooked::ShowCursor(installed))))
 }
 
+/// Redirects `module`'s `ClipCursor` import: while the module's windows are
+/// kept hidden ([`keeps_pointer_shown`]) its clips and releases are kept
+/// from the system (answered as done). The clip is global: the game
+/// releasing its own (`ClipCursor(NULL)`, Civilization III after a drag on
+/// its forms) released the viewer's window's, letting the pointer out of a
+/// windowed viewer. `None` if the module does not import it. Once per
+/// process.
+pub fn hook_clip_cursor(module: u32) -> Result<Option<Hook>, HookError> {
+    let Some(slot) = slot(module, "ClipCursor")? else { return Ok(None) };
+    let installed = clip_cursor::install_slot(slot, |call| {
+        if keeps_pointer_shown() { 1 } else { call.original() }
+    })?;
+    Ok(Some(Hook(Hooked::ClipCursor(installed))))
+}
+
 /// Whether the module's hiding of the system pointer is kept from the
 /// system: while its windows are kept hidden, where the pointer the user
 /// sees is never over them.
@@ -224,51 +247,27 @@ pub fn standard_cursor(handle: u32) -> Option<u16> {
 }
 
 
-/// A rectangular system-pointer confinement in screen coordinates,
-/// `[left, top, right, bottom]`. Releasing or dropping it only removes the
-/// rectangle this instance installed, so a later clip from another window
-/// is left alone. The caller releases before losing focus or handing the
-/// pointer to another capture mechanism.
-#[derive(Default)]
-pub struct Confinement {
-    screen: Option<[i32; 4]>,
+/// The system pointer's clip in screen coordinates, `[left, top, right,
+/// bottom]` (the whole desktop while there is none), as the calling
+/// thread's DPI awareness sees it; `None` if it cannot be read.
+pub fn clip_rect() -> Option<[i32; 4]> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetClipCursor;
+    let mut r = RECT::default();
+    // SAFETY: GetClipCursor writes one valid RECT.
+    (unsafe { GetClipCursor(&mut r) } != 0).then_some([r.left, r.top, r.right, r.bottom])
 }
 
-impl Confinement {
-    /// Installs a nonempty rectangle, or releases with `None`. Returns
-    /// whether a requested rectangle was installed successfully.
-    pub fn set(&mut self, screen: Option<[i32; 4]>) -> bool {
-        use windows_sys::Win32::Foundation::RECT;
-        use windows_sys::Win32::UI::WindowsAndMessaging::ClipCursor;
-        let Some(screen) = screen.filter(|r| r[2] > r[0] && r[3] > r[1]) else { self.release(); return false };
-        if self.screen == Some(screen) { return true; }
-        let rect = RECT { left: screen[0], top: screen[1], right: screen[2], bottom: screen[3] };
-        // SAFETY: ClipCursor reads a valid RECT for the duration of this call.
-        if unsafe { ClipCursor(&rect) } != 0 {
-            self.screen = Some(screen);
-            return true;
-        }
-        false
-    }
-
-    /// Releases this instance's rectangle, unless another window has
-    /// already replaced the global clip with its own rectangle.
-    pub fn release(&mut self) {
-        use windows_sys::Win32::Foundation::RECT;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{ClipCursor, GetClipCursor};
-        let Some(screen) = self.screen.take() else { return };
-        let mut current = RECT::default();
-        // SAFETY: GetClipCursor writes one valid RECT; null releases the clip.
-        unsafe {
-            if GetClipCursor(&mut current) != 0 && [current.left, current.top, current.right, current.bottom] == screen {
-                ClipCursor(std::ptr::null());
-            }
-        }
-    }
-}
-
-impl Drop for Confinement {
-    fn drop(&mut self) { self.release(); }
+/// Clips the system pointer to `screen` (`[left, top, right, bottom]`),
+/// or releases the clip with `None`. Whether the system took it. The
+/// system cuts the rectangle to the desktop ([`clip_rect`] tells).
+pub fn clip_cursor(screen: Option<[i32; 4]>) -> bool {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::ClipCursor;
+    let rect = screen.map(|s| RECT { left: s[0], top: s[1], right: s[2], bottom: s[3] });
+    // SAFETY: ClipCursor reads a valid RECT for the duration of the call;
+    // null releases the clip.
+    unsafe { ClipCursor(rect.as_ref().map_or(std::ptr::null(), |r| r as *const RECT)) != 0 }
 }
 
 /// The user's pointer size at 96 DPI, in pixels: the accessibility
