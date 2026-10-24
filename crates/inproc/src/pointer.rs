@@ -111,14 +111,20 @@ fn slot(module: u32, function: &str) -> Result<Option<Ptr32<u32>>, HookError> {
     Ok(crate::pe::import_slot(module, "USER32.dll", function)?)
 }
 
+/// The pointer's position in screen coordinates under an override, what
+/// `GetCursorPos` reports then (`None`: the system's).
+pub fn overridden() -> Option<(i32, i32)> {
+    let o = current()?;
+    o.window.client_to_screen(o.x, o.y)
+}
+
 /// Redirects `module`'s `GetCursorPos` import: under an override it reports
 /// the override's point (in screen coordinates, as the system does).
 /// `None` if the module does not import it. Once per process.
 pub fn hook_cursor_pos(module: u32) -> Result<Option<Hook>, HookError> {
     let Some(slot) = slot(module, "GetCursorPos")? else { return Ok(None) };
     let installed = get_cursor_pos::install_slot(slot, |call| {
-        let Some(o) = current() else { return call.original() };
-        let Some(screen) = o.window.client_to_screen(o.x, o.y) else { return call.original() };
+        let Some(screen) = overridden() else { return call.original() };
         // A bad buffer fails as the system's own call would.
         match Ptr32::<[i32; 2]>::new(call.point).write(&[screen.0, screen.1]) {
             Ok(()) => 1,

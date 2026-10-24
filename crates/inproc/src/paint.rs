@@ -87,6 +87,32 @@ pub fn repaint(window: Window) {
     }
 }
 
+/// After `InvalidateRect(hwnd, rect, ..)` (`rect` a `RECT*`, 0 for all
+/// of the window): for a hidden window, keeps the area and posts a paint.
+/// For a program that calls Windows itself, as the hooks below do it.
+pub fn invalidated(hwnd: u32, rect: u32) {
+    let window = Window::from_handle(hwnd);
+    if hwnd != 0 && !window.is_visible() {
+        let rect = match rect {
+            0 => client(window),
+            at => Ptr32::<[i32; 4]>::new(at).read().ok(),
+        };
+        if let Some(rect) = rect {
+            invalidate(window, rect);
+        }
+    }
+}
+
+/// After `BeginPaint(hwnd, paint)` (`paint` a `PAINTSTRUCT*`): for a
+/// hidden window, the area kept since becomes the paint's `rcPaint`.
+pub fn begun(hwnd: u32, paint: u32) {
+    let pending = take_pending(hwnd);
+    if let (Some(rect), false) = (pending, Window::from_handle(hwnd).is_visible()) {
+        // PAINTSTRUCT: hdc, fErase, then rcPaint.
+        let _ = Ptr32::<[i32; 4]>::new(paint).offset::<[i32; 4]>(8).and_then(|p| p.write(&rect));
+    }
+}
+
 /// The redirected imports; restored when dropped.
 pub struct Hooks(#[allow(dead_code)] invalidate_rect::Installed, #[allow(dead_code)] begin_paint::Installed);
 
@@ -104,25 +130,12 @@ pub fn hook_hidden_painting(module: u32) -> Result<Option<Hooks>, HookError> {
     let (Some(invalidate_slot), Some(begin_slot)) = (slot("InvalidateRect")?, slot("BeginPaint")?) else { return Ok(None) };
     let invalidated = invalidate_rect::install_slot(invalidate_slot, |call| {
         let r = call.original();
-        let window = Window::from_handle(call.hwnd);
-        if call.hwnd != 0 && !window.is_visible() {
-            let rect = match call.rect {
-                0 => client(window),
-                at => Ptr32::<[i32; 4]>::new(at).read().ok(),
-            };
-            if let Some(rect) = rect {
-                invalidate(window, rect);
-            }
-        }
+        invalidated(call.hwnd, call.rect);
         r
     })?;
     let begun = begin_paint::install_slot(begin_slot, |call| {
         let dc = call.original();
-        let pending = take_pending(call.hwnd);
-        if let (Some(rect), false) = (pending, Window::from_handle(call.hwnd).is_visible()) {
-            // PAINTSTRUCT: hdc, fErase, then rcPaint.
-            let _ = Ptr32::<[i32; 4]>::new(call.paint).offset::<[i32; 4]>(8).and_then(|p| p.write(&rect));
-        }
+        begun(call.hwnd, call.paint);
         dc
     })?;
     Ok(Some(Hooks(invalidated, begun)))
