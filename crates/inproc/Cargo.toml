@@ -9,7 +9,7 @@ version.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
 log.workspace = true
-civ3r-sync = { path = "../civ3r-sync" }
+handoff = { path = "../handoff" }
 tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [target.'cfg(windows)'.dependencies]

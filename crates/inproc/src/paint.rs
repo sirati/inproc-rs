@@ -34,12 +34,12 @@ struct Hidden {
     /// A `WM_PAINT` was posted and its `BeginPaint` has not run yet.
     waiting: AtomicBool,
     /// Rectangles (left, top, right, bottom) invalidated since.
-    rects: civ3r_sync::Mailbox<[i32; 4]>,
+    rects: handoff::Mailbox<[i32; 4]>,
 }
 
 /// More hidden windows than a program paints.
 static HIDDEN: LazyLock<[Hidden; 8]> = LazyLock::new(|| {
-    std::array::from_fn(|_| Hidden { window: AtomicU32::new(0), waiting: AtomicBool::new(false), rects: civ3r_sync::Mailbox::new() })
+    std::array::from_fn(|_| Hidden { window: AtomicU32::new(0), waiting: AtomicBool::new(false), rects: handoff::Mailbox::new() })
 });
 
 fn hidden(window: u32, claim: bool) -> Option<&'static Hidden> {

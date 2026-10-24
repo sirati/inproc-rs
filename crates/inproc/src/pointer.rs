@@ -64,7 +64,7 @@ pub struct Override {
 }
 
 /// Read by the hooked imports on the game's thread without waiting.
-static OVERRIDE: civ3r_sync::Latest<Override> = civ3r_sync::Latest::new();
+static OVERRIDE: handoff::Latest<Override> = handoff::Latest::new();
 
 /// Sets (or with `None` ends) the override the hooked imports answer with.
 pub fn set(o: Option<Override>) {
