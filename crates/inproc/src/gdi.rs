@@ -63,3 +63,18 @@ pub fn font(handle: u32) -> Option<LogFont> {
         face: String::from_utf8_lossy(&face).into_owned(),
     })
 }
+
+/// The text colour of `dc` exactly as `GetTextColor` returns it (a
+/// `COLORREF`, or `DIBINDEX(i)` = 0x10FF00ii; `CLR_INVALID` for non-DCs).
+pub fn dc_text_colorref(dc: u32) -> u32 {
+    // SAFETY: returns CLR_INVALID for non-DCs.
+    unsafe { GetTextColor(dc as usize as *mut core::ffi::c_void) }
+}
+
+/// The LOGFONT of stock object `index` (`GetStockObject`, e.g. 13 for
+/// `SYSTEM_FONT`), if it is a font.
+pub fn stock_font(index: i32) -> Option<LogFont> {
+    // SAFETY: GetStockObject accepts any index and returns NULL for unknown ones.
+    let h = unsafe { windows_sys::Win32::Graphics::Gdi::GetStockObject(index as _) };
+    font(h as usize as u32)
+}
