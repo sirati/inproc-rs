@@ -74,7 +74,11 @@ pub use mem::{MemError, Ptr32};
 /// the DLL is loaded; panics in it are caught and logged. `early`, if given,
 /// runs before, in `DllMain` itself (under the loader lock: before the
 /// program's own code runs on, for redirecting what it asks the system
-/// first; it must not load libraries or wait for threads).
+/// first; it must not load libraries or wait for threads). `ending`, if
+/// given, runs in `DllMain` when the process ends through `ExitProcess`:
+/// the system has killed every other thread then and holds the loader
+/// lock, and the other DLLs' detach (some of which wait for threads of
+/// theirs that are dead) comes after it.
 ///
 /// ```ignore
 /// inproc::entry!(my_init);
@@ -86,6 +90,9 @@ macro_rules! entry {
         $crate::entry!($init, early = $crate::dll::nothing);
     };
     ($init:path, early = $early:path) => {
+        $crate::entry!($init, early = $early, ending = $crate::dll::nothing);
+    };
+    ($init:path, early = $early:path, ending = $ending:path) => {
         #[cfg(windows)]
         #[doc(hidden)]
         #[allow(unsafe_code)]
@@ -95,7 +102,7 @@ macro_rules! entry {
             reason: u32,
             reserved: *mut ::core::ffi::c_void,
         ) -> i32 {
-            $crate::dll::dll_main(module, reason, reserved, $init, $early)
+            $crate::dll::dll_main(module, reason, reserved, $init, $early, $ending)
         }
     };
 }

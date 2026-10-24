@@ -21,6 +21,40 @@ pub fn terminate(code: u32) -> ! {
     unsafe { ExitProcess(code) }
 }
 
+crate::stdcall_hook! {
+    /// `VOID ExitProcess(UINT)`.
+    mod exit_process(code) -> ();
+}
+
+/// A redirected `ExitProcess` import ([`hook_exit_process`]); stays for the
+/// life of the process once forgotten.
+pub struct ExitHook(#[allow(dead_code)] exit_process::Installed);
+
+/// Calls `ending(code)` when `module` calls `ExitProcess` (through its
+/// import: the C runtime's `exit` after `WinMain` returns, a fatal error),
+/// before the system kills the other threads and runs the DLLs' detach.
+/// `ending` may end the process itself ([`terminate`]); if it returns, the
+/// original `ExitProcess` runs. `None` if the module does not import it.
+pub fn hook_exit_process(module: u32, ending: fn(u32)) -> Result<Option<ExitHook>, crate::hook::HookError> {
+    let Some(slot) = crate::pe::import_slot(module, "KERNEL32.dll", "ExitProcess")? else { return Ok(None) };
+    let installed = exit_process::install_slot(slot, move |call| {
+        ending(call.code);
+        call.original()
+    })?;
+    Ok(Some(ExitHook(installed)))
+}
+
+/// The exit code this process ends with, once it is ending (in a DLL's
+/// detach while `ExitProcess` runs), else `None`.
+pub fn exit_code() -> Option<u32> {
+    use windows_sys::Win32::System::Threading::GetExitCodeProcess;
+    const STILL_ACTIVE: u32 = 259;
+    let mut code = 0;
+    // SAFETY: the pseudo handle names this process; writes `code` only.
+    let ok = unsafe { GetExitCodeProcess(GetCurrentProcess(), &mut code) } != 0;
+    (ok && code != STILL_ACTIVE).then_some(code)
+}
+
 /// Memory of this process, in bytes.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Memory {

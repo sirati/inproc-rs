@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::sync::OnceLock;
 
 use windows_sys::Win32::System::LibraryLoader::DisableThreadLibraryCalls;
-use windows_sys::Win32::System::SystemServices::DLL_PROCESS_ATTACH;
+use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
 
 static MODULE: OnceLock<usize> = OnceLock::new();
 
@@ -13,10 +13,16 @@ pub fn module_handle() -> Option<usize> {
     MODULE.get().copied()
 }
 
-/// No early initialisation (see [`entry!`](crate::entry)).
+/// No early initialisation, nothing at the process's end (see
+/// [`entry!`](crate::entry)).
 pub fn nothing() {}
 
-pub fn dll_main(module: *mut c_void, reason: u32, _reserved: *mut c_void, init: fn(), early: fn()) -> i32 {
+pub fn dll_main(module: *mut c_void, reason: u32, reserved: *mut c_void, init: fn(), early: fn(), ending: fn()) -> i32 {
+    // (A non-null `reserved`: the process ends, rather than a FreeLibrary.)
+    if reason == DLL_PROCESS_DETACH && !reserved.is_null() {
+        let _ = std::panic::catch_unwind(ending);
+        return 1;
+    }
     if reason == DLL_PROCESS_ATTACH {
         let _ = MODULE.set(module as usize);
         // SAFETY: `module` is the handle the loader passed to DllMain.
