@@ -13,6 +13,23 @@ pub fn module_handle() -> Option<usize> {
     MODULE.get().copied()
 }
 
+/// One more reference to this DLL (`LoadLibraryW` on its own file), for
+/// a module that will `FreeLibrary` a handle of it it was given; the
+/// handle (0 if it could not be had).
+pub fn add_reference() -> u32 {
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, LoadLibraryW};
+    let Some(module) = module_handle() else { return 0 };
+    let mut path = [0u16; 1024];
+    // SAFETY: our own module's handle and a buffer of ours.
+    let n = unsafe { GetModuleFileNameW(module as _, path.as_mut_ptr(), path.len() as u32) } as usize;
+    if n == 0 || n >= path.len() {
+        return 0;
+    }
+    path[n] = 0;
+    // SAFETY: a NUL-terminated path of ours: our own DLL, already loaded.
+    unsafe { LoadLibraryW(path.as_ptr()) as usize as u32 }
+}
+
 /// No early initialisation, nothing at the process's end (see
 /// [`entry!`](crate::entry)).
 pub fn nothing() {}
