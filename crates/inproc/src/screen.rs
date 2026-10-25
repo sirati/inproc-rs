@@ -84,6 +84,24 @@ pub fn display_modes() -> Vec<(u32, u32)> {
 /// mode (its own pixels).
 pub type ScreenSize = std::sync::Arc<dyn Fn((i32, i32)) -> (i32, i32) + Send + Sync>;
 
+/// The screen's size as `size` makes it of the display's mode when first
+/// asked, from then on (what [`hook_scaled`]'s modules learn; for a module
+/// of ours that asks itself).
+pub fn reported(size: &ScreenSize) -> (i32, i32) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics;
+    match SIZE.get() {
+        Some(&known) => known,
+        None => {
+            // SAFETY: plain queries of the screen's size.
+            let full = display_mode().unwrap_or_else(|| unsafe { (GetSystemMetrics(SM_CXSCREEN as i32), GetSystemMetrics(SM_CYSCREEN as i32)) });
+            let (w, h) = size(full);
+            // (A thread racing this one computed the same; the first stays.)
+            let _ = SIZE.set((w.max(1), h.max(1)));
+            *SIZE.get().unwrap_or(&(w.max(1), h.max(1)))
+        }
+    }
+}
+
 /// Redirects `module`'s `GetSystemMetrics` import so that it reports the
 /// primary screen as `size` makes it of the display's mode when first
 /// asked (in its own pixels, the program's DPI awareness aside; else as the
@@ -94,7 +112,6 @@ pub type ScreenSize = std::sync::Arc<dyn Fn((i32, i32)) -> (i32, i32) + Send + S
 /// makes its window), all learning the same size; safe to call from
 /// `DllMain` (no library is loaded).
 pub fn hook_scaled(module: u32, size: ScreenSize) -> Result<Option<Hook>, HookError> {
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetSystemMetrics;
     let Some(slot) = crate::pe::import_slot(module, "USER32.dll", "GetSystemMetrics")? else { return Ok(None) };
     let scaled = move |index: u32, original: &dyn Fn() -> i32| {
         let axis = match index {
@@ -102,17 +119,7 @@ pub fn hook_scaled(module: u32, size: ScreenSize) -> Result<Option<Hook>, HookEr
             SM_CYSCREEN => 1,
             _ => return original(),
         };
-        let (w, h) = match SIZE.get() {
-            Some(&known) => known,
-            None => {
-                // SAFETY: plain queries of the screen's size.
-                let full = display_mode().unwrap_or_else(|| unsafe { (GetSystemMetrics(SM_CXSCREEN as i32), GetSystemMetrics(SM_CYSCREEN as i32)) });
-                let (w, h) = size(full);
-                // (A thread racing this one computed the same; the first stays.)
-                let _ = SIZE.set((w.max(1), h.max(1)));
-                *SIZE.get().unwrap_or(&(w.max(1), h.max(1)))
-            }
-        };
+        let (w, h) = reported(&size);
         if axis == 0 { w } else { h }
     };
     // Each of the two hook modules claims itself once; the first free one

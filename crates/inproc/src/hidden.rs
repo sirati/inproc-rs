@@ -52,6 +52,13 @@ pub fn hiding() -> bool {
     HIDING.load(Ordering::SeqCst)
 }
 
+/// The `ShowWindow` command a window gets for `show`: `SW_HIDE` for a
+/// top-level window while hiding.
+pub fn show_command(hwnd: u32, show: u32) -> u32 {
+    let hide = hiding() && show != SW_HIDE && Window::from_handle(hwnd).is_top_level();
+    if hide { SW_HIDE } else { show }
+}
+
 /// The redirected imports; restored when dropped.
 pub struct Hooks(Vec<Installed>);
 
@@ -100,8 +107,7 @@ pub fn hook_hidden_windows(module: u32) -> Result<Option<Hooks>, HookError> {
     }
     if let Some(s) = slot("ShowWindow")? {
         hooks.push(Installed::Show(show_window::install_slot(s, |c| {
-            let hide = hiding() && c.show != SW_HIDE && Window::from_handle(c.hwnd).is_top_level();
-            if hide { c.original_with(c.hwnd, SW_HIDE) } else { c.original() }
+            c.original_with(c.hwnd, show_command(c.hwnd, c.show))
         })?));
     }
     if let Some(s) = slot("SetWindowPos")? {

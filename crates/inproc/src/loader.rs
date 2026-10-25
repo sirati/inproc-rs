@@ -48,6 +48,34 @@ pub fn hook_load_library(module: u32, loaded: impl Fn(&str, u32) + Send + Sync +
     Ok(Some(Hook(installed)))
 }
 
+/// As [`hook_load_library`], and a library `answer` names (by its file name
+/// in lower case, as `loaded` gets it) is not loaded at all: the module
+/// gets `answer`'s handle instead (a module of ours that stands in for it;
+/// `answer` adds the reference the module's `FreeLibrary` of it takes
+/// away). `loaded` is not told of an answered library.
+#[cfg(windows)]
+pub fn hook_load_library_answering(
+    module: u32,
+    answer: impl Fn(&str) -> Option<u32> + Send + Sync + 'static,
+    loaded: impl Fn(&str, u32) + Send + Sync + 'static,
+) -> Result<Option<Hook>, HookError> {
+    let Some(slot) = crate::pe::import_slot(module, "KERNEL32.dll", "LoadLibraryA")? else { return Ok(None) };
+    let installed = load_library_a::install_slot(slot, move |call| {
+        if let Some(handle) = c_string(call.name).and_then(|path| answer(&file_name(&path))) {
+            return handle;
+        }
+        load_then_notify(|| call.original(), || c_string(call.name), |name, base| loaded(name, base))
+    })?;
+    Ok(Some(Hook(installed)))
+}
+
+/// A library's file name as [`hook_load_library`] gives it: lower case,
+/// no folder, `.dll` added to a name without an extension.
+pub fn file_name(path: &str) -> String {
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(path).to_ascii_lowercase();
+    if name.contains('.') { name } else { format!("{name}.dll") }
+}
+
 /// Runs mandatory preparation for every caller before claiming one-time
 /// module setup. `prepare` must serialize shared import installation itself;
 /// a previous claim never skips this caller's preparation. Returns true only
@@ -118,10 +146,7 @@ fn load_then_notify(load: impl FnOnce() -> u32, path: impl FnOnce() -> Option<St
     let base = load();
     if base != 0 {
         if let Some(path) = path() {
-            let name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_ascii_lowercase();
-            // A name without an extension is a DLL's.
-            let name = if name.contains('.') { name } else { format!("{name}.dll") };
-            loaded(&name, base);
+            loaded(&file_name(&path), base);
         }
     }
     base
