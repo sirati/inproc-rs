@@ -112,7 +112,7 @@ unsafe extern "system" fn procedure(
     if id == WM_NCDESTROY {
         release(window as isize);
     }
-    match handled {
+    let result = match handled {
         Some(result) => result,
         None => {
             // SAFETY: previous is the actual WNDPROC returned by Windows
@@ -120,7 +120,11 @@ unsafe extern "system" fn procedure(
             let previous = unsafe { std::mem::transmute(previous) };
             unsafe { CallWindowProcW(previous, window, id, wparam, lparam) }
         }
+    };
+    if id == WM_NCDESTROY {
+        crate::paint::destroyed(window as usize as u32);
     }
+    result
 }
 
 /// Restores the original procedure on drop, provided no later subclass
