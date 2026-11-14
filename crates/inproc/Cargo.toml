@@ -1,30 +1,43 @@
+
 [package]
 name = "inproc"
 description = "Safe abstractions for code injected into a foreign Windows process: guarded memory reads, vtable hooks, DLL entry"
-edition.workspace = true
-license.workspace = true
-version.workspace = true
+
+[package.edition]
+workspace = true
+
+[package.license]
+workspace = true
+
+[package.version]
+workspace = true
 
 [dependencies]
-bytemuck.workspace = true
-thiserror.workspace = true
-log.workspace = true
-handoff = { path = "../handoff" }
-tokio = { version = "1", default-features = false, features = ["sync"] }
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
-    "Win32_Foundation",
-    "Win32_System_Diagnostics_Debug",
-    "Win32_System_Memory",
-    "Win32_System_Threading",
-    "Win32_System_LibraryLoader",
-    "Win32_System_SystemServices",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_UI_HiDpi",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_Graphics_Gdi",
-    "Win32_System_ProcessStatus",
-    "Win32_System_SystemInformation",
-    "Win32_System_Registry",
-] }
+[dependencies.bytemuck]
+workspace = true
+
+[dependencies.thiserror]
+workspace = true
+
+[dependencies.log]
+workspace = true
+
+[dependencies.handoff]
+git = "ssh://git@github.com/sirati/tilerenderer.git"
+rev = "6941948fc77ad310c9021df6f01374be9d3a23fc"
+
+[dependencies.tokio]
+version = "1"
+default-features = false
+features = ["sync"]
+
+[target]
+
+[target."cfg(windows)"]
+
+[target."cfg(windows)".dependencies]
+
+[target."cfg(windows)".dependencies.windows-sys]
+version = "0.61"
+features = ["Win32_Foundation", "Win32_System_Diagnostics_Debug", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_LibraryLoader", "Win32_System_SystemServices", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Gdi", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Registry"]
